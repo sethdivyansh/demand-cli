@@ -44,7 +44,6 @@ use std::{
     sync::Arc,
 };
 
-use futures::StreamExt;
 use std::net::ToSocketAddrs;
 use tracing::error;
 
