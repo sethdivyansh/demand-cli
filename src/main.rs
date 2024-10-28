@@ -2,6 +2,7 @@ use jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use std::net::ToSocketAddrs;
@@ -69,8 +70,10 @@ async fn main() {
         .recv()
         .await
         .expect("translator failed before initialization");
-    let jdc_abortable = if let Some(_tp_addr) = TP_ADDRESS.as_ref() {
-        Some(
+    let jdc_abortable: Option<AbortOnDrop>;
+    let share_accounter_abortable;
+    if let Some(_tp_addr) = TP_ADDRESS.as_ref() {
+        jdc_abortable = Some(
             jd_client::start(
                 jdc_from_translator_receiver,
                 jdc_to_translator_sender,
@@ -78,18 +81,26 @@ async fn main() {
                 from_jdc_to_share_accounter_send,
             )
             .await,
+        );
+        share_accounter_abortable = share_accounter::start(
+            from_jdc_to_share_accounter_recv,
+            from_share_accounter_to_jdc_send,
+            recv_from_pool,
+            send_to_pool,
         )
+        .await;
     } else {
-        None
+        jdc_abortable = None;
+
+        share_accounter_abortable = share_accounter::start(
+            jdc_from_translator_receiver,
+            jdc_to_translator_sender,
+            recv_from_pool,
+            send_to_pool,
+        )
+        .await;
     };
 
-    let share_accounter_abortable = share_accounter::start(
-        from_jdc_to_share_accounter_recv,
-        from_share_accounter_to_jdc_send,
-        recv_from_pool,
-        send_to_pool,
-    )
-    .await;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         if pool_connection_abortable.is_finished() {
