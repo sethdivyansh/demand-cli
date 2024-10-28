@@ -90,77 +90,77 @@ async fn initialize_jd(
     };
 
     // Initialize JD part
-    if let Some(tp_address) = crate::TP_ADDRESS.as_ref() {
-        let mut parts = tp_address.split(':');
-        let ip_tp = parts.next().unwrap().to_string();
-        let port_tp = parts.next().unwrap().parse::<u16>().unwrap();
+    let tp_address = crate::TP_ADDRESS
+        .as_ref()
+        .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present");
+    let mut parts = tp_address.split(':');
+    let ip_tp = parts.next().unwrap().to_string();
+    let port_tp = parts.next().unwrap().parse::<u16>().unwrap();
 
-        let auth_pub_k: Secp256k1PublicKey =
-            crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
-        let (jd, jd_abortable) = match JobDeclarator::new(
-            crate::POOL_ADDRESS
-                .to_socket_addrs()
-                .unwrap()
-                .next()
-                .unwrap(),
-            auth_pub_k.into_bytes(),
-            upstream.clone(),
-        )
+    let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let (jd, jd_abortable) = match JobDeclarator::new(
+        crate::POOL_ADDRESS
+            .to_socket_addrs()
+            .unwrap()
+            .next()
+            .unwrap(),
+        auth_pub_k.into_bytes(),
+        upstream.clone(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(_e) => {
+            // TODO TODO TODO
+            todo!()
+        }
+    };
+
+    TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
         .await
-        {
-            Ok(c) => c,
-            Err(_e) => {
-                // TODO TODO TODO
-                todo!()
+        .unwrap();
+
+    let donwstream = Arc::new(Mutex::new(DownstreamMiningNode::new(
+        sender,
+        Some(upstream.clone()),
+        send_solution,
+        false,
+        vec![],
+        Some(jd.clone()),
+    )));
+    let downstream_abortable = DownstreamMiningNode::start(donwstream.clone(), receiver).await;
+    TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable)
+        .await
+        .unwrap();
+    upstream
+        .safe_lock(|u| u.downstream = Some(donwstream.clone()))
+        .expect("Poison lock");
+
+    // Start receiving messages from the SV2 Upstream role
+    let upstream_abortable =
+        match mining_upstream::Upstream::parse_incoming(upstream.clone(), up_receiver).await {
+            Ok(abortable) => abortable,
+            Err(e) => {
+                error!("failed to create sv2 parser: {}", e);
+                panic!()
             }
         };
+    TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable)
+        .await
+        .unwrap();
 
-        TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
-            .await
-            .unwrap();
-
-        let donwstream = Arc::new(Mutex::new(DownstreamMiningNode::new(
-            sender,
-            Some(upstream.clone()),
-            send_solution,
-            false,
-            vec![],
-            Some(jd.clone()),
-        )));
-        let downstream_abortable = DownstreamMiningNode::start(donwstream.clone(), receiver).await;
-        TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable)
-            .await
-            .unwrap();
-        upstream
-            .safe_lock(|u| u.downstream = Some(donwstream.clone()))
-            .expect("Poison lock");
-
-        // Start receiving messages from the SV2 Upstream role
-        let upstream_abortable =
-            match mining_upstream::Upstream::parse_incoming(upstream.clone(), up_receiver).await {
-                Ok(abortable) => abortable,
-                Err(e) => {
-                    error!("failed to create sv2 parser: {}", e);
-                    panic!()
-                }
-            };
-        TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable)
-            .await
-            .unwrap();
-
-        let tp_abortable = TemplateRx::connect(
-            SocketAddr::new(IpAddr::from_str(ip_tp.as_str()).unwrap(), port_tp),
-            recv_solution,
-            Some(jd.clone()),
-            donwstream,
-            vec![],
-            None,
-            test_only_do_not_send_solution_to_tp,
-        )
-        .await;
-        TaskManager::add_template_receiver_task(task_manager, tp_abortable)
-            .await
-            .unwrap();
-    }
+    let tp_abortable = TemplateRx::connect(
+        SocketAddr::new(IpAddr::from_str(ip_tp.as_str()).unwrap(), port_tp),
+        recv_solution,
+        Some(jd.clone()),
+        donwstream,
+        vec![],
+        None,
+        test_only_do_not_send_solution_to_tp,
+    )
+    .await;
+    TaskManager::add_template_receiver_task(task_manager, tp_abortable)
+        .await
+        .unwrap();
     abortable
 }
