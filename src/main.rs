@@ -2,6 +2,7 @@ use jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use std::net::ToSocketAddrs;
@@ -29,12 +30,15 @@ const POOL_ADDRESS: &str = "mining.dmnd.work:2000";
 //const POOL_ADDRESS: &str = "localhost:2000";
 const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
 //const AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
-const TP_ADDRESS: &str = "127.0.0.1:8442";
+//const TP_ADDRESS: &str = "127.0.0.1:8442";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
 lazy_static! {
     static ref SV1_DOWN_LISTEN_ADDR: String =
         std::env::var("SV1_DOWN_LISTEN_ADDR").unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
+}
+lazy_static! {
+    static ref TP_ADDRESS: Option<String> = std::env::var("TP_ADDRESS").ok();
 }
 
 #[tokio::main]
@@ -66,21 +70,37 @@ async fn main() {
         .recv()
         .await
         .expect("translator failed before initialization");
-    let jdc_abortable = jd_client::start(
-        jdc_from_translator_receiver,
-        jdc_to_translator_sender,
-        from_share_accounter_to_jdc_recv,
-        from_jdc_to_share_accounter_send,
-    )
-    .await;
+    let jdc_abortable: Option<AbortOnDrop>;
+    let share_accounter_abortable;
+    if let Some(_tp_addr) = TP_ADDRESS.as_ref() {
+        jdc_abortable = Some(
+            jd_client::start(
+                jdc_from_translator_receiver,
+                jdc_to_translator_sender,
+                from_share_accounter_to_jdc_recv,
+                from_jdc_to_share_accounter_send,
+            )
+            .await,
+        );
+        share_accounter_abortable = share_accounter::start(
+            from_jdc_to_share_accounter_recv,
+            from_share_accounter_to_jdc_send,
+            recv_from_pool,
+            send_to_pool,
+        )
+        .await;
+    } else {
+        jdc_abortable = None;
 
-    let share_accounter_abortable = share_accounter::start(
-        from_jdc_to_share_accounter_recv,
-        from_share_accounter_to_jdc_send,
-        recv_from_pool,
-        send_to_pool,
-    )
-    .await;
+        share_accounter_abortable = share_accounter::start(
+            jdc_from_translator_receiver,
+            jdc_to_translator_sender,
+            recv_from_pool,
+            send_to_pool,
+        )
+        .await;
+    };
+
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         if pool_connection_abortable.is_finished() {
@@ -95,9 +115,11 @@ async fn main() {
             error!("Translator error");
             break;
         }
-        if jdc_abortable.is_finished() {
-            error!("Jdc error");
-            break;
+        if let Some(ref jdc) = jdc_abortable {
+            if jdc.is_finished() {
+                error!("Jdc error");
+                break;
+            }
         }
         if share_accounter_abortable.is_finished() {
             error!("Share accounter error");

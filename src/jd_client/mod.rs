@@ -90,7 +90,10 @@ async fn initialize_jd(
     };
 
     // Initialize JD part
-    let mut parts = crate::TP_ADDRESS.split(':');
+    let tp_address = crate::TP_ADDRESS
+        .as_ref()
+        .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present");
+    let mut parts = tp_address.split(':');
     let ip_tp = parts.next().unwrap().to_string();
     let port_tp = parts.next().unwrap().parse::<u16>().unwrap();
 
@@ -112,6 +115,7 @@ async fn initialize_jd(
             todo!()
         }
     };
+
     TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
         .await
         .unwrap();
