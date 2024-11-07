@@ -86,6 +86,11 @@ fn relay_down(
                         }
                     };
                 }
+                PoolExtMessages::Mining(msg) => {
+                    if sender.send(msg).await.is_err() {
+                        break;
+                    }
+                }
                 _ => panic!("Pool send unexpected message on mining connection"),
             }
         }
