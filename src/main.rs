@@ -58,7 +58,15 @@ async fn main() {
     let pool_addresses = vec![address];
 
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
-    let (send_to_pool, recv_from_pool, pool_connection_abortable) = router.connect_pool().await;
+    let (send_to_pool, recv_from_pool, pool_connection_abortable) = router
+        .connect_pool(None)
+        .await
+        .expect("Error connecting pool");
+
+    // Monitor and switch upstream when better one becomes available
+    tokio::spawn(async move {
+        router.monitor_upstream().await;
+    });
 
     let (downs_sv1_tx, downs_sv1_rx) = channel(10);
     let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);

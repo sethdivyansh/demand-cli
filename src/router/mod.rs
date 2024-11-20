@@ -13,6 +13,7 @@ use roles_logic_sv2::{common_messages_sv2::SetupConnection, parsers::Mining};
 use tokio::{
     net::TcpStream,
     sync::mpsc::{Receiver, Sender},
+    time::interval,
 };
 use tracing::info;
 
@@ -54,14 +55,23 @@ impl Router {
         let mut best_pool = None;
         let mut least_latency = Duration::MAX;
         for &pool_addr in &self.pool_addresses {
-            if let Ok(latency) = self.get_latency(pool_addr).await {
-                // info!("Latency for {:?} is {:?}", &pool_addr, latency);
-                if latency < least_latency {
-                    least_latency = latency;
-                    best_pool = Some(pool_addr)
+            match self.get_latency(pool_addr).await {
+                Ok(latency) => {
+                    info!("Latency for {:?} is {:?}", &pool_addr, latency);
+                    if latency < least_latency {
+                        least_latency = latency;
+                        best_pool = Some(pool_addr)
+                    }
+                }
+                _ => {
+                    info!("Upstream {:?} is busy, skipping...", &pool_addr)
                 }
             }
         }
+        if best_pool.is_none() {
+            info!("No reachable pool found");
+        }
+
         best_pool
     }
 
@@ -69,23 +79,36 @@ impl Router {
     /// Uses minin_pool_connection::connect_pool
     pub async fn connect_pool(
         &mut self,
-    ) -> (
-        tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
-        tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
-        AbortOnDrop,
-    ) {
-        let pool = self.select_pool().await.expect("No pool found");
+        pool_addr: Option<SocketAddr>,
+    ) -> Result<
+        (
+            tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
+            tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
+            AbortOnDrop,
+        ),
+        (),
+    > {
+        let pool = match pool_addr {
+            Some(addr) => addr,
+            None => self.select_pool().await.ok_or(()).unwrap(),
+        };
         self.current_pool = Some(pool);
 
         info!("Upstream {:?} selected", pool);
-        minin_pool_connection::connect_pool(
+        match minin_pool_connection::connect_pool(
             pool,
             self.auth_pub_k,
             self.setup_connection_msg.clone(),
             self.timer,
         )
         .await
-        .expect("Error opening connection")
+        {
+            Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
+                Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
+            }
+
+            Err(_) => Err(()),
+        }
     }
 
     /// Returns the sum all the latencies for a given upstream
@@ -94,14 +117,19 @@ impl Router {
         let setup_connection_msg = self.setup_connection_msg.as_ref();
         let timer = self.timer.as_ref();
         let auth_pub_key = self.auth_pub_k;
-        PoolLatency::get_mining_setup_latencies(
+        if let Err(_) = PoolLatency::get_mining_setup_latencies(
             &mut pool,
             setup_connection_msg.cloned(),
             timer.cloned(),
             auth_pub_key,
         )
-        .await;
-        PoolLatency::get_jd_latencies(&mut pool, auth_pub_key).await;
+        .await
+        {
+            return Err(());
+        }
+        if let Err(_) = PoolLatency::get_jd_latencies(&mut pool, auth_pub_key).await {
+            return Err(());
+        }
 
         let latencies = [
             pool.open_sv2_mining_connection,
@@ -115,6 +143,31 @@ impl Router {
         let sum_of_latencies: Duration = latencies.iter().flatten().sum();
         Ok(sum_of_latencies)
     }
+
+    pub async fn monitor_upstream(&mut self) {
+        let mut interval = interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Some(best_pool) = self.select_pool().await {
+                if Some(best_pool) != self.current_pool {
+                    info!("Switching to faster upstreamn {:?}", best_pool);
+                    // drop(self.current_pool);
+                    if let Err(_) = self.connect_pool(Some(best_pool)).await {
+                        info!("Failed to switch to upstream {:?}", best_pool,);
+                    }
+                }
+            }
+        }
+    }
+    // async fn switch_upstream(&self, pool_addr: SocketAddr) -> Result<(), ()> {
+    //     match minin_pool_connection::connect_pool(pool_addr, self.auth_pub_k, self.setup_connection_msg.clone(), self.timer).await {
+    //         Ok((send_to_pool, receive_from_pool, abortable)) => {
+    //             info!("Successfully connected to new upstream {:?}", pool_addr);
+    //             Ok((send_to_pool, receive_from_pool, abortable))
+    //         }
+    //         Err(_) => Err(())
+    //     }
+    // }
 }
 
 /// Track latencies for various stages of pool connection setup.
@@ -150,106 +203,136 @@ impl PoolLatency {
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
         authority_public_key: Secp256k1PublicKey,
-    ) {
+    ) -> Result<(), ()> {
         // Set open_sv2_mining_connection latency
         let open_sv2_mining_connection_timer = Instant::now();
-        if let Ok(stream) = TcpStream::connect(crate::POOL_ADDRESS).await {
-            self.open_sv2_mining_connection = Some(open_sv2_mining_connection_timer.elapsed());
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(crate::POOL_ADDRESS),
+        )
+        .await
+        {
+            Ok(stream) => {
+                self.open_sv2_mining_connection = Some(open_sv2_mining_connection_timer.elapsed());
 
-            let (mut receiver, mut sender, setup_connection_msg) =
-                initialize_mining_connections(setup_connection_msg, stream, authority_public_key)
+                let (mut receiver, mut sender, setup_connection_msg) =
+                    initialize_mining_connections(
+                        setup_connection_msg,
+                        stream.unwrap(),
+                        authority_public_key,
+                    )
                     .await;
 
-            // Set setup_channel latency
-            let setup_channel_timer = Instant::now();
-            let result = mining_setup_connection(
-                &mut receiver,
-                &mut sender,
-                setup_connection_msg,
-                timer.unwrap_or(Duration::from_secs(5)),
-            )
-            .await;
-            if let Ok(_setup_success) = result {
-                self.setup_a_channel = Some(setup_channel_timer.elapsed());
+                // Set setup_channel latency
+                let setup_channel_timer = Instant::now();
+                let result = mining_setup_connection(
+                    &mut receiver,
+                    &mut sender,
+                    setup_connection_msg,
+                    timer.unwrap_or(Duration::from_secs(2)),
+                )
+                .await;
+                match result {
+                    Ok(_) => {
+                        self.setup_a_channel = Some(setup_channel_timer.elapsed());
+                        let (send_to_down, mut recv_from_down) = tokio::sync::mpsc::channel(10);
+                        let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
+                        let channel = open_channel();
+                        send_from_down
+                            .send(PoolExtMessages::Mining(channel))
+                            .await
+                            .unwrap();
 
-                let (send_to_down, mut recv_from_down) = tokio::sync::mpsc::channel(10);
-                let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
-                let channel = open_channel();
-                send_from_down
-                    .send(PoolExtMessages::Mining(channel))
-                    .await
-                    .unwrap();
+                        let relay_up_task = minin_pool_connection::relay_up(recv_to_up, sender);
+                        let relay_down_task =
+                            minin_pool_connection::relay_down(receiver, send_to_down);
 
-                let relay_up_task = minin_pool_connection::relay_up(recv_to_up, sender);
-                let relay_down_task = minin_pool_connection::relay_down(receiver, send_to_down);
-
-                let timer = Instant::now();
-                let mut received_new_job = false;
-                let mut received_prev_hash = false;
-                while let Some(message) = recv_from_down.recv().await {
-                    if let PoolExtMessages::Mining(Mining::NewExtendedMiningJob(_new_ext_job)) =
-                        message.clone()
-                    {
-                        // Set receive_first_job latency
-                        self.receive_first_job = Some(timer.elapsed());
-                        received_new_job = true;
+                        let timer = Instant::now();
+                        let mut received_new_job = false;
+                        let mut received_prev_hash = false;
+                        while let Some(message) = recv_from_down.recv().await {
+                            if let PoolExtMessages::Mining(Mining::NewExtendedMiningJob(
+                                _new_ext_job,
+                            )) = message.clone()
+                            {
+                                // Set receive_first_job latency
+                                self.receive_first_job = Some(timer.elapsed());
+                                received_new_job = true;
+                            }
+                            if let PoolExtMessages::Mining(Mining::SetNewPrevHash(_new_prev_hash)) =
+                                message.clone()
+                            {
+                                // Set receive_first_set_new_prev_hash latency
+                                self.receive_first_set_new_prev_hash = Some(timer.elapsed());
+                                received_prev_hash = true;
+                            }
+                            // Both latencies have been set so we break the loop
+                            if received_new_job && received_prev_hash {
+                                break;
+                            }
+                        }
+                        drop(relay_up_task);
+                        drop(relay_down_task);
+                        Ok(())
                     }
-                    if let PoolExtMessages::Mining(Mining::SetNewPrevHash(_new_prev_hash)) =
-                        message.clone()
-                    {
-                        // Set receive_first_set_new_prev_hash latency
-                        self.receive_first_set_new_prev_hash = Some(timer.elapsed());
-                        received_prev_hash = true;
-                    }
-                    // Both latencies have been set so we break the loop
-                    if received_new_job && received_prev_hash {
-                        break;
-                    }
+                    Err(_) => Err(()),
                 }
-                clean_up_tasks(relay_up_task, relay_down_task);
             }
+            _ => Err(()),
         }
     }
 
     /// Sets the `PoolLatency`'s `open_sv2_jd_connection` and `get_a_mining_token`
-    async fn get_jd_latencies(&mut self, authority_public_key: Secp256k1PublicKey) {
+    async fn get_jd_latencies(
+        &mut self,
+        authority_public_key: Secp256k1PublicKey,
+    ) -> Result<(), ()> {
         let address = self.pool;
 
         // Set open_sv2_jd_connection latency
         let open_sv2_jd_connection_timer = Instant::now();
-        let stream = tokio::net::TcpStream::connect(address)
-            .await
-            .expect("Unable to connect to pool");
-        let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
-            .expect("Unable to create initialtor");
-        let (mut receiver, mut sender, _, _) =
-            Connection::new(stream, HandshakeRole::Initiator(initiator))
-                .await
-                .expect("impossible to connect");
-        SetupConnectionHandler::setup(&mut receiver, &mut sender, address)
-            .await
-            .unwrap();
 
-        self.open_sv2_jd_connection = Some(open_sv2_jd_connection_timer.elapsed());
+        match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => {
+                if let Some(_tp_addr) = crate::TP_ADDRESS.as_ref() {
+                    let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
+                        .expect("Unable to create initialtor");
+                    let (mut receiver, mut sender, _, _) =
+                        Connection::new(stream, HandshakeRole::Initiator(initiator))
+                            .await
+                            .expect("impossible to connect");
+                    SetupConnectionHandler::setup(&mut receiver, &mut sender, address)
+                        .await
+                        .unwrap();
 
-        let (sender, mut _receiver) = tokio::sync::mpsc::channel(10);
-        let upstream = crate::jd_client::mining_upstream::Upstream::new(
-            0,
-            crate::POOL_SIGNATURE.to_string(),
-            sender,
-        )
-        .await
-        .unwrap();
+                    self.open_sv2_jd_connection = Some(open_sv2_jd_connection_timer.elapsed());
 
-        let (job_declarator, _aborter) =
-            JobDeclarator::new(address, authority_public_key.into_bytes(), upstream)
-                .await
-                .unwrap();
+                    let (sender, mut _receiver) = tokio::sync::mpsc::channel(10);
+                    let upstream = crate::jd_client::mining_upstream::Upstream::new(
+                        0,
+                        crate::POOL_SIGNATURE.to_string(),
+                        sender,
+                    )
+                    .await
+                    .unwrap();
 
-        // Set get_a_mining_token latency
-        let get_a_mining_token_timer = Instant::now();
-        let _token = JobDeclarator::get_last_token(&job_declarator).await;
-        self.get_a_mining_token = Some(get_a_mining_token_timer.elapsed());
+                    let (job_declarator, _aborter) =
+                        JobDeclarator::new(address, authority_public_key.into_bytes(), upstream)
+                            .await
+                            .unwrap();
+
+                    // Set get_a_mining_token latency
+                    let get_a_mining_token_timer = Instant::now();
+                    let _token = JobDeclarator::get_last_token(&job_declarator).await;
+                    self.get_a_mining_token = Some(get_a_mining_token_timer.elapsed());
+                } else {
+                    self.open_sv2_jd_connection = Some(Duration::from_millis(0));
+                    self.get_a_mining_token = Some(Duration::from_millis(0));
+                }
+                Ok(())
+            }
+            _ => Err(()),
+        }
     }
 }
 
@@ -283,13 +366,4 @@ async fn initialize_mining_connections(
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
     (receiver, sender, setup_connection_msg)
-}
-
-fn clean_up_tasks(relay_up_task: AbortOnDrop, relay_down_task: AbortOnDrop) {
-    if relay_up_task.is_finished() {
-        drop(relay_up_task);
-    }
-    if relay_down_task.is_finished() {
-        drop(relay_down_task);
-    }
 }
