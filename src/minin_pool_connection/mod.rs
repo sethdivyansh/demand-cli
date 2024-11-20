@@ -97,7 +97,7 @@ pub async fn connect_pool(
     }
 }
 
-fn relay_up(
+pub fn relay_up(
     mut recv: Receiver<PoolExtMessages<'static>>,
     send: Sender<EitherFrame>,
 ) -> AbortOnDrop {
@@ -118,7 +118,7 @@ fn relay_up(
     task.into()
 }
 
-fn relay_down(
+pub fn relay_down(
     mut recv: Receiver<EitherFrame>,
     send: Sender<PoolExtMessages<'static>>,
 ) -> AbortOnDrop {
@@ -154,7 +154,7 @@ fn relay_down(
     task.into()
 }
 
-async fn mining_setup_connection(
+pub async fn mining_setup_connection(
     recv: &mut Receiver<EitherFrame>,
     send: &mut Sender<EitherFrame>,
     setup_conection: SetupConnection<'static>,

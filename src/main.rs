@@ -12,6 +12,7 @@ use tracing::{error, info};
 mod ingress;
 pub mod jd_client;
 mod minin_pool_connection;
+mod router;
 mod share_accounter;
 mod shared;
 mod translator;
@@ -52,10 +53,12 @@ async fn main() {
         .expect("Invalid pool address")
         .next()
         .expect("Invalid pool address");
-    let (send_to_pool, recv_from_pool, pool_connection_abortable) =
-        minin_pool_connection::connect_pool(address, auth_pub_k, None, None)
-            .await
-            .expect("Impossible connect to the pool");
+
+    // We will add upstream addresses here
+    let pool_addresses = vec![address];
+
+    let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
+    let (send_to_pool, recv_from_pool, pool_connection_abortable) = router.connect_pool().await;
 
     let (downs_sv1_tx, downs_sv1_rx) = channel(10);
     let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);

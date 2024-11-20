@@ -1,9 +1,9 @@
 #![allow(special_module_name)]
 
 mod error;
-mod job_declarator;
+pub mod job_declarator;
 pub mod mining_downstream;
-mod mining_upstream;
+pub mod mining_upstream;
 mod task_manager;
 mod template_receiver;
 
