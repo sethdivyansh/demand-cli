@@ -55,13 +55,21 @@ async fn main() {
         .expect("Invalid pool address");
 
     // We will add upstream addresses here
-    let pool_addresses = vec![address];
+    let pool_addresses = vec![address, address];
 
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
-    let (send_to_pool, recv_from_pool, pool_connection_abortable) = router
+    let (send_to_pool, recv_from_pool, pool_connection_abortable, rx_shutdown) = router
         .connect_pool(None)
         .await
         .expect("Error connecting pool");
+
+    // Listen for shutdown signal
+    tokio::spawn(async move {
+        if rx_shutdown.await.is_ok() {
+            info!("Closing pool connection");
+            drop(pool_connection_abortable)
+        }
+    });
 
     // Monitor and switch upstream when better one becomes available
     tokio::spawn(async move {
@@ -115,10 +123,10 @@ async fn main() {
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        if pool_connection_abortable.is_finished() {
-            error!("Upstream mining connnection closed");
-            break;
-        }
+        // if pool_connection_abortable.is_finished() {
+        //     error!("Upstream mining connnection closed");
+        //     break;
+        // }
         if sv1_ingress_abortable.is_finished() {
             error!("Downtream mining socket unavailable");
             break;

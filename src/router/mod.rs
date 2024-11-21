@@ -12,7 +12,10 @@ use noise_sv2::Initiator;
 use roles_logic_sv2::{common_messages_sv2::SetupConnection, parsers::Mining};
 use tokio::{
     net::TcpStream,
-    sync::mpsc::{Receiver, Sender},
+    sync::{
+        mpsc::{Receiver, Sender},
+        oneshot,
+    },
     time::interval,
 };
 use tracing::info;
@@ -30,6 +33,7 @@ pub struct Router {
     auth_pub_k: Secp256k1PublicKey,
     setup_connection_msg: Option<SetupConnection<'static>>,
     timer: Option<Duration>,
+    shutdown_signal: Option<oneshot::Sender<()>>,
 }
 
 impl Router {
@@ -46,12 +50,13 @@ impl Router {
             auth_pub_k,
             setup_connection_msg,
             timer,
+            shutdown_signal: None,
         }
     }
 
     /// Selects the upstream with the least latency from the available upstreams.
-    async fn select_pool(&self) -> Option<SocketAddr> {
-        info!("Selecting best upstream.....");
+    async fn select_pool(&self, msg: &str) -> Option<SocketAddr> {
+        info!("{:?}", msg);
         let mut best_pool = None;
         let mut least_latency = Duration::MAX;
         for &pool_addr in &self.pool_addresses {
@@ -85,16 +90,24 @@ impl Router {
             tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
             tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
             AbortOnDrop,
+            tokio::sync::oneshot::Receiver<()>,
         ),
         (),
     > {
         let pool = match pool_addr {
             Some(addr) => addr,
-            None => self.select_pool().await.ok_or(()).unwrap(),
+            None => self
+                .select_pool("Selecting best upstream..")
+                .await
+                .ok_or(())
+                .unwrap(),
         };
         self.current_pool = Some(pool);
 
         info!("Upstream {:?} selected", pool);
+
+        let (tx, rx) = oneshot::channel();
+        self.shutdown_signal = Some(tx);
         match minin_pool_connection::connect_pool(
             pool,
             self.auth_pub_k,
@@ -104,7 +117,7 @@ impl Router {
         .await
         {
             Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
-                Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
+                Ok((send_to_pool, recv_from_pool, pool_connection_abortable, rx))
             }
 
             Err(_) => Err(()),
@@ -117,17 +130,18 @@ impl Router {
         let setup_connection_msg = self.setup_connection_msg.as_ref();
         let timer = self.timer.as_ref();
         let auth_pub_key = self.auth_pub_k;
-        if let Err(_) = PoolLatency::get_mining_setup_latencies(
+        if (PoolLatency::get_mining_setup_latencies(
             &mut pool,
             setup_connection_msg.cloned(),
             timer.cloned(),
             auth_pub_key,
         )
-        .await
+        .await)
+            .is_err()
         {
             return Err(());
         }
-        if let Err(_) = PoolLatency::get_jd_latencies(&mut pool, auth_pub_key).await {
+        if (PoolLatency::get_jd_latencies(&mut pool, auth_pub_key).await).is_err() {
             return Err(());
         }
 
@@ -144,30 +158,35 @@ impl Router {
         Ok(sum_of_latencies)
     }
 
+    /// Closes current pool connection
+    fn close_connection(&mut self) {
+        if let Some(tx) = self.shutdown_signal.take() {
+            if tx.send(()).is_err() {
+                info!("Connection not open");
+            }
+        }
+    }
+
+    /// Checks for faster upstream switch to it if found
     pub async fn monitor_upstream(&mut self) {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
         let mut interval = interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            if let Some(best_pool) = self.select_pool().await {
+            if let Some(best_pool) = self.select_pool("Checking for faster upstream..").await {
                 if Some(best_pool) != self.current_pool {
                     info!("Switching to faster upstreamn {:?}", best_pool);
-                    // drop(self.current_pool);
-                    if let Err(_) = self.connect_pool(Some(best_pool)).await {
+                    self.close_connection();
+                    if (self.connect_pool(Some(best_pool)).await).is_err() {
                         info!("Failed to switch to upstream {:?}", best_pool,);
                     }
+                } else {
+                    info!("Continuing on current upstream...")
                 }
             }
         }
     }
-    // async fn switch_upstream(&self, pool_addr: SocketAddr) -> Result<(), ()> {
-    //     match minin_pool_connection::connect_pool(pool_addr, self.auth_pub_k, self.setup_connection_msg.clone(), self.timer).await {
-    //         Ok((send_to_pool, receive_from_pool, abortable)) => {
-    //             info!("Successfully connected to new upstream {:?}", pool_addr);
-    //             Ok((send_to_pool, receive_from_pool, abortable))
-    //         }
-    //         Err(_) => Err(())
-    //     }
-    // }
 }
 
 /// Track latencies for various stages of pool connection setup.
