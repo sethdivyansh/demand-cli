@@ -7,7 +7,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
-use std::net::ToSocketAddrs;
+use std::{net::ToSocketAddrs, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info};
 
@@ -60,13 +60,19 @@ async fn main() {
     let pool_addresses = vec![address];
 
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
-    initialize_proxy(&mut router, None).await;
+    let epsilon = Duration::from_millis(10);
+    let best_upstream = router.select_pool_connect().await;
+    initialize_proxy(&mut router, best_upstream, epsilon).await;
     info!("exiting");
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 }
 
 #[async_recursion]
-async fn initialize_proxy(router: &mut Router, pool_addr: Option<std::net::SocketAddr>) {
+async fn initialize_proxy(
+    router: &mut Router,
+    pool_addr: Option<std::net::SocketAddr>,
+    epsilon: Duration,
+) {
     // Initial setup for the proxy
     let (send_to_pool, recv_from_pool, pool_connection_abortable) = router
         .connect_pool(pool_addr)
@@ -121,32 +127,39 @@ async fn initialize_proxy(router: &mut Router, pool_addr: Option<std::net::Socke
 
     // Collecting all abort handles
     let mut abort_handles = vec![
-        pool_connection_abortable,
-        sv1_ingress_abortable,
-        translator_abortable,
-        share_accounter_abortable,
+        (pool_connection_abortable, "pool_connection".to_string()),
+        (sv1_ingress_abortable, "sv1_ingress".to_string()),
+        (translator_abortable, "translator".to_string()),
+        (share_accounter_abortable, "share_accounter".to_string()),
     ];
     if let Some(jdc_handle) = jdc_abortable {
-        abort_handles.push(jdc_handle);
+        abort_handles.push((jdc_handle, "jdc".to_string()));
     }
 
-    monitor(router, &mut abort_handles).await;
+    monitor(router, abort_handles, epsilon).await;
 }
 
-async fn monitor(router: &mut Router, abort_handles: &mut Vec<AbortOnDrop>) {
+async fn monitor(
+    router: &mut Router,
+    abort_handles: Vec<(AbortOnDrop, std::string::String)>,
+    epsilon: Duration,
+) {
     //let mut interval = tokio::time::interval(time::Duration::from_secs(10));
     loop {
-        if let Some(new_upstream) = router.monitor_upstream().await {
+        if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
             info!("Faster upstream detected. Reinitializing proxy...");
-            drop(abort_handles.remove(0));
-            initialize_proxy(router, Some(new_upstream.clone())).await;
+            drop(abort_handles);
+            initialize_proxy(router, Some(new_upstream), epsilon).await;
             return;
         }
 
         // Monitor finished tasks
-        if abort_handles.iter().any(|handle| handle.is_finished()) {
-            error!("Task finished, Closing connection");
-            for handle in abort_handles.drain(..) {
+        if let Some((_handle, name)) = abort_handles
+            .iter()
+            .find(|(handle, _name)| handle.is_finished())
+        {
+            error!("Task {:?} finished, Closing connection", name);
+            for (handle, _name) in abort_handles {
                 drop(handle);
             }
             return;

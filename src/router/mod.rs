@@ -14,7 +14,7 @@ use tokio::{
     net::TcpStream,
     sync::mpsc::{Receiver, Sender},
 };
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
@@ -48,30 +48,60 @@ impl Router {
         }
     }
 
-    /// Selects the upstream with the least latency from the available upstreams.
-    async fn select_pool(&self, msg: &str) -> Option<SocketAddr> {
-        info!("{:?}", msg);
+    /// Internal function to select pool with the least latency.
+    async fn select_pool(&self) -> Option<(SocketAddr, Duration)> {
         let mut best_pool = None;
         let mut least_latency = Duration::MAX;
+
         for &pool_addr in &self.pool_addresses {
-            match self.get_latency(pool_addr).await {
-                Ok(latency) => {
-                    info!("Latency for {:?} is {:?}", &pool_addr, latency);
-                    if latency < least_latency {
-                        least_latency = latency;
-                        best_pool = Some(pool_addr)
-                    }
-                }
-                _ => {
-                    info!("Upstream {:?} is busy, skipping...", &pool_addr)
+            if let Ok(latency) = self.get_latency(pool_addr).await {
+                if latency < least_latency {
+                    least_latency = latency;
+                    best_pool = Some(pool_addr)
                 }
             }
         }
-        if best_pool.is_none() {
-            info!("No reachable pool found");
-        }
 
-        best_pool
+        best_pool.map(|pool| (pool, least_latency))
+    }
+
+    /// Select the best pool for connection
+    pub async fn select_pool_connect(&self) -> Option<SocketAddr> {
+        info!("Selecting the best upstream ");
+        if let Some((pool, latency)) = self.select_pool().await {
+            info!("Latency for upstream {:?} is {:?}", pool, latency);
+            Some(pool)
+        } else {
+            info!("No available pool");
+            None
+        }
+    }
+
+    /// Select the best pool for monitoring
+    async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
+        if let Some((best_pool, best_pool_latency)) = self.select_pool().await {
+            if let Some(current_pool) = self.current_pool {
+                let current_latency = self
+                    .get_latency(current_pool)
+                    .await
+                    .expect("Error getting latency");
+                if best_pool_latency < (current_latency - epsilon) {
+                    debug!(
+                        "Found faster pool: {:?} with latency {:?}",
+                        best_pool, best_pool_latency
+                    );
+                    return Some(best_pool);
+                } else {
+                    debug!(
+                        "No significant improvement. Continuing with {:?}",
+                        current_pool
+                    );
+                }
+            } else {
+                return Some(best_pool);
+            }
+        }
+        None
     }
 
     /// Selects the best upstream and connects to.
@@ -89,11 +119,7 @@ impl Router {
     > {
         let pool = match pool_addr {
             Some(addr) => addr,
-            None => self
-                .select_pool("Selecting best upstream..")
-                .await
-                .ok_or(())
-                .unwrap(),
+            None => self.select_pool_connect().await.ok_or(()).unwrap(),
         };
         self.current_pool = Some(pool);
 
@@ -150,13 +176,12 @@ impl Router {
     }
 
     /// Checks for faster upstream switch to it if found
-    pub async fn monitor_upstream(&mut self) -> Option<SocketAddr> {
-        if let Some(best_pool) = self.select_pool("Checking for faster upstream..").await {
+    pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
+        if let Some(best_pool) = self.select_pool_monitor(epsilon).await {
             if Some(best_pool) != self.current_pool {
                 info!("Switching to faster upstreamn {:?}", best_pool);
                 return Some(best_pool);
             } else {
-                info!("Continuing on current upstream...");
                 return None;
             }
         }
@@ -244,6 +269,7 @@ impl PoolLatency {
                         let timer = Instant::now();
                         let mut received_new_job = false;
                         let mut received_prev_hash = false;
+
                         while let Some(message) = recv_from_down.recv().await {
                             if let PoolExtMessages::Mining(Mining::NewExtendedMiningJob(
                                 _new_ext_job,
@@ -267,6 +293,7 @@ impl PoolLatency {
                         }
                         drop(relay_up_task);
                         drop(relay_down_task);
+
                         Ok(())
                     }
                     Err(_) => Err(()),
