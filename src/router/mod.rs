@@ -36,7 +36,9 @@ impl Router {
     pub fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
+        // Pool setup connection msg
         setup_connection_msg: Option<SetupConnection<'static>>,
+        // Max duration for pool setup after which it times out
         timer: Option<Duration>,
     ) -> Self {
         Self {
