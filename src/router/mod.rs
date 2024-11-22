@@ -12,11 +12,7 @@ use noise_sv2::Initiator;
 use roles_logic_sv2::{common_messages_sv2::SetupConnection, parsers::Mining};
 use tokio::{
     net::TcpStream,
-    sync::{
-        mpsc::{Receiver, Sender},
-        oneshot,
-    },
-    time::interval,
+    sync::mpsc::{Receiver, Sender},
 };
 use tracing::info;
 
@@ -33,7 +29,6 @@ pub struct Router {
     auth_pub_k: Secp256k1PublicKey,
     setup_connection_msg: Option<SetupConnection<'static>>,
     timer: Option<Duration>,
-    shutdown_signal: Option<oneshot::Sender<()>>,
 }
 
 impl Router {
@@ -50,7 +45,6 @@ impl Router {
             auth_pub_k,
             setup_connection_msg,
             timer,
-            shutdown_signal: None,
         }
     }
 
@@ -90,7 +84,6 @@ impl Router {
             tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
             tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
             AbortOnDrop,
-            tokio::sync::oneshot::Receiver<()>,
         ),
         (),
     > {
@@ -106,8 +99,6 @@ impl Router {
 
         info!("Upstream {:?} selected", pool);
 
-        let (tx, rx) = oneshot::channel();
-        self.shutdown_signal = Some(tx);
         match minin_pool_connection::connect_pool(
             pool,
             self.auth_pub_k,
@@ -117,7 +108,7 @@ impl Router {
         .await
         {
             Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
-                Ok((send_to_pool, recv_from_pool, pool_connection_abortable, rx))
+                Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
             }
 
             Err(_) => Err(()),
@@ -158,34 +149,18 @@ impl Router {
         Ok(sum_of_latencies)
     }
 
-    /// Closes current pool connection
-    fn close_connection(&mut self) {
-        if let Some(tx) = self.shutdown_signal.take() {
-            if tx.send(()).is_err() {
-                info!("Connection not open");
-            }
-        }
-    }
-
     /// Checks for faster upstream switch to it if found
-    pub async fn monitor_upstream(&mut self) {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-
-        let mut interval = interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            if let Some(best_pool) = self.select_pool("Checking for faster upstream..").await {
-                if Some(best_pool) != self.current_pool {
-                    info!("Switching to faster upstreamn {:?}", best_pool);
-                    self.close_connection();
-                    if (self.connect_pool(Some(best_pool)).await).is_err() {
-                        info!("Failed to switch to upstream {:?}", best_pool,);
-                    }
-                } else {
-                    info!("Continuing on current upstream...")
-                }
+    pub async fn monitor_upstream(&mut self) -> Option<SocketAddr> {
+        if let Some(best_pool) = self.select_pool("Checking for faster upstream..").await {
+            if Some(best_pool) != self.current_pool {
+                info!("Switching to faster upstreamn {:?}", best_pool);
+                return Some(best_pool);
+            } else {
+                info!("Continuing on current upstream...");
+                return None;
             }
         }
+        None
     }
 }
 

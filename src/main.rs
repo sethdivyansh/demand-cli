@@ -1,4 +1,6 @@
+use async_recursion::async_recursion;
 use jemallocator::Jemalloc;
+use router::Router;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -55,26 +57,21 @@ async fn main() {
         .expect("Invalid pool address");
 
     // We will add upstream addresses here
-    let pool_addresses = vec![address, address];
+    let pool_addresses = vec![address];
 
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
-    let (send_to_pool, recv_from_pool, pool_connection_abortable, rx_shutdown) = router
-        .connect_pool(None)
+    initialize_proxy(&mut router, None).await;
+    info!("exiting");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+}
+
+#[async_recursion]
+async fn initialize_proxy(router: &mut Router, pool_addr: Option<std::net::SocketAddr>) {
+    // Initial setup for the proxy
+    let (send_to_pool, recv_from_pool, pool_connection_abortable) = router
+        .connect_pool(pool_addr)
         .await
         .expect("Error connecting pool");
-
-    // Listen for shutdown signal
-    tokio::spawn(async move {
-        if rx_shutdown.await.is_ok() {
-            info!("Closing pool connection");
-            drop(pool_connection_abortable)
-        }
-    });
-
-    // Monitor and switch upstream when better one becomes available
-    tokio::spawn(async move {
-        router.monitor_upstream().await;
-    });
 
     let (downs_sv1_tx, downs_sv1_rx) = channel(10);
     let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
@@ -82,14 +79,15 @@ async fn main() {
     let (translator_up_tx, mut translator_up_rx) = channel(10);
     let translator_abortable = translator::start(downs_sv1_rx, translator_up_tx)
         .await
-        .expect("Impossible initialize translator");
+        .expect("Impossible to initialize translator");
 
     let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
     let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) = channel(10);
     let (jdc_to_translator_sender, jdc_from_translator_receiver, _) = translator_up_rx
         .recv()
         .await
-        .expect("translator failed before initialization");
+        .expect("Translator failed before initialization");
+
     let jdc_abortable: Option<AbortOnDrop>;
     let share_accounter_abortable;
     if let Some(_tp_addr) = TP_ADDRESS.as_ref() {
@@ -121,31 +119,38 @@ async fn main() {
         .await;
     };
 
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        // if pool_connection_abortable.is_finished() {
-        //     error!("Upstream mining connnection closed");
-        //     break;
-        // }
-        if sv1_ingress_abortable.is_finished() {
-            error!("Downtream mining socket unavailable");
-            break;
-        }
-        if translator_abortable.is_finished() {
-            error!("Translator error");
-            break;
-        }
-        if let Some(ref jdc) = jdc_abortable {
-            if jdc.is_finished() {
-                error!("Jdc error");
-                break;
-            }
-        }
-        if share_accounter_abortable.is_finished() {
-            error!("Share accounter error");
-            break;
-        }
+    // Collecting all abort handles
+    let mut abort_handles = vec![
+        pool_connection_abortable,
+        sv1_ingress_abortable,
+        translator_abortable,
+        share_accounter_abortable,
+    ];
+    if let Some(jdc_handle) = jdc_abortable {
+        abort_handles.push(jdc_handle);
     }
-    info!("exiting");
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    monitor(router, &mut abort_handles).await;
+}
+
+async fn monitor(router: &mut Router, abort_handles: &mut Vec<AbortOnDrop>) {
+    //let mut interval = tokio::time::interval(time::Duration::from_secs(10));
+    loop {
+        if let Some(new_upstream) = router.monitor_upstream().await {
+            info!("Faster upstream detected. Reinitializing proxy...");
+            drop(abort_handles.remove(0));
+            initialize_proxy(router, Some(new_upstream.clone())).await;
+            return;
+        }
+
+        // Monitor finished tasks
+        if abort_handles.iter().any(|handle| handle.is_finished()) {
+            error!("Task finished, Closing connection");
+            for handle in abort_handles.drain(..) {
+                drop(handle);
+            }
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
 }
