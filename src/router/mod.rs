@@ -36,9 +36,11 @@ impl Router {
     pub fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
-        // Pool setup connection msg
+        // Configuration msg used to setup connection between client and pool
+        // If not, present `get_mining_setup_connection_msg()` is called to generated default values
         setup_connection_msg: Option<SetupConnection<'static>>,
-        // Max duration for pool setup after which it times out
+        // Max duration for pool setup after which it times out.
+        // If None, default time of 5s is used.
         timer: Option<Duration>,
     ) -> Self {
         Self {
@@ -83,6 +85,9 @@ impl Router {
     async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
         if let Some((best_pool, best_pool_latency)) = self.select_pool().await {
             if let Some(current_pool) = self.current_pool {
+                if best_pool == current_pool {
+                    return None;
+                }
                 let current_latency = self
                     .get_latency(current_pool)
                     .await
@@ -94,10 +99,7 @@ impl Router {
                     );
                     return Some(best_pool);
                 } else {
-                    debug!(
-                        "No significant improvement. Continuing with {:?}",
-                        current_pool
-                    );
+                    return None;
                 }
             } else {
                 return Some(best_pool);
