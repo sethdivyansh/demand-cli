@@ -123,7 +123,11 @@ impl Router {
     > {
         let pool = match pool_addr {
             Some(addr) => addr,
-            None => self.select_pool_connect().await.ok_or(()).unwrap(),
+            None => self
+                .select_pool_connect()
+                .await
+                .ok_or(())
+                .expect("Failed to select pool"),
         };
         self.current_pool = Some(pool);
 
@@ -235,13 +239,13 @@ impl PoolLatency {
         )
         .await
         {
-            Ok(stream) => {
+            Ok(Ok(stream)) => {
                 self.open_sv2_mining_connection = Some(open_sv2_mining_connection_timer.elapsed());
 
                 let (mut receiver, mut sender, setup_connection_msg) =
                     initialize_mining_connections(
                         setup_connection_msg,
-                        stream.unwrap(),
+                        stream,
                         authority_public_key,
                     )
                     .await;
@@ -264,7 +268,7 @@ impl PoolLatency {
                         send_from_down
                             .send(PoolExtMessages::Mining(channel))
                             .await
-                            .unwrap();
+                            .expect("Failed to send msg to pool");
 
                         let relay_up_task = minin_pool_connection::relay_up(recv_to_up, sender);
                         let relay_down_task =
@@ -328,7 +332,7 @@ impl PoolLatency {
                             .expect("impossible to connect");
                     SetupConnectionHandler::setup(&mut receiver, &mut sender, address)
                         .await
-                        .unwrap();
+                        .expect("Failed to set up connection");
 
                     self.open_sv2_jd_connection = Some(open_sv2_jd_connection_timer.elapsed());
 
@@ -339,12 +343,12 @@ impl PoolLatency {
                         sender,
                     )
                     .await
-                    .unwrap();
+                    .expect("Failed to create upstream");
 
                     let (job_declarator, _aborter) =
                         JobDeclarator::new(address, authority_public_key.into_bytes(), upstream)
                             .await
-                            .unwrap();
+                            .expect("Failed to instantiate job declarator");
 
                     // Set get_a_mining_token latency
                     let get_a_mining_token_timer = Instant::now();
@@ -368,7 +372,10 @@ fn open_channel() -> Mining<'static> {
             request_id: 0,
             max_target: binary_sv2::u256_from_int(u64::MAX),
             min_extranonce_size: 8,
-            user_identity: "ABC".to_string().try_into().unwrap(),
+            user_identity: "ABC"
+                .to_string()
+                .try_into()
+                .expect("Failed to convert user identity to string"),
             nominal_hash_rate: 0.0,
         },
     )
