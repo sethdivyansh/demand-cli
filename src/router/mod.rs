@@ -337,13 +337,9 @@ impl PoolLatency {
                     self.open_sv2_jd_connection = Some(open_sv2_jd_connection_timer.elapsed());
 
                     let (sender, mut _receiver) = tokio::sync::mpsc::channel(10);
-                    let upstream = crate::jd_client::mining_upstream::Upstream::new(
-                        0,
-                        crate::POOL_SIGNATURE.to_string(),
-                        sender,
-                    )
-                    .await
-                    .expect("Failed to create upstream");
+                    let upstream = crate::jd_client::mining_upstream::Upstream::new(0, sender)
+                        .await
+                        .expect("Failed to create upstream");
 
                     let (job_declarator, _aborter) =
                         JobDeclarator::new(address, authority_public_key.into_bytes(), upstream)
