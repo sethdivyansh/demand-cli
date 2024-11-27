@@ -75,12 +75,7 @@ async fn initialize_jd(
     let (send_solution, recv_solution) = tokio::sync::mpsc::channel(10);
 
     // Instantiate a new `Upstream` (SV2 Pool)
-    let upstream = match mining_upstream::Upstream::new(
-        0, // TODO
-        crate::POOL_SIGNATURE.to_string(),
-        up_sender,
-    )
-    .await
+    let upstream = match mining_upstream::Upstream::new(crate::MIN_EXTRANONCE_SIZE, up_sender).await
     {
         Ok(upstream) => upstream,
         Err(e) => {

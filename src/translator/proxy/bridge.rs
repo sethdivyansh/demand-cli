@@ -88,7 +88,6 @@ impl Bridge {
                 share_per_min,
                 ExtendedChannelKind::Proxy { upstream_target },
                 None,
-                String::from(""),
                 up_id,
             ),
             future_jobs: vec![],
@@ -336,6 +335,10 @@ impl Bridge {
             })
             .map_err(|_| PoisonLock)?;
 
+        let extranonce_len = self_
+            .safe_lock(|s| s.channel_factory.get_extranonce_len())
+            .unwrap();
+
         let mut match_a_future_job = false;
         while let Some(job) = future_jobs.pop() {
             if job.job_id == sv2_set_new_prev_hash.job_id {
@@ -345,6 +348,7 @@ impl Bridge {
                     sv2_set_new_prev_hash.clone(),
                     job,
                     true,
+                    extranonce_len,
                 );
 
                 // Get the sender to send the mining.notify to the Downstream
@@ -411,6 +415,10 @@ impl Bridge {
             .map_err(|_| PoisonLock)?
             .unwrap();
 
+        let extranonce_len = self_
+            .safe_lock(|s| s.channel_factory.get_extranonce_len())
+            .unwrap();
+
         // If future_job=true, this job is meant for a future SetNewPrevHash that the proxy
         // has yet to receive. Insert this new job into the job_mapper .
         if sv2_new_extended_mining_job.is_future() {
@@ -438,6 +446,7 @@ impl Bridge {
                 last_p_hash,
                 sv2_new_extended_mining_job.clone(),
                 true,
+                extranonce_len,
             );
             // Get the sender to send the mining.notify to the Downstream
             tx_sv1_notify.send(notify.clone()).unwrap();

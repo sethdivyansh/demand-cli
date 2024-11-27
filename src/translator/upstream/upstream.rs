@@ -6,7 +6,7 @@ use super::super::{
     },
     upstream::diff_management::UpstreamDifficultyConfig,
 };
-use binary_sv2::u256_from_int;
+use binary_sv2::U256;
 use roles_logic_sv2::{
     common_messages_sv2::Protocol,
     common_properties::{IsMiningUpstream, IsUpstream},
@@ -118,7 +118,7 @@ impl Upstream {
             job_id: None,
             last_job_id: None,
             min_extranonce_size,
-            upstream_extranonce1_size: 16, // 16 is the default since that is the only value the pool supports currently
+            upstream_extranonce1_size: crate::UPSTREAM_EXTRANONCE1_SIZE,
             tx_sv2_extranonce,
             target,
             difficulty_config,
@@ -171,8 +171,8 @@ impl Upstream {
             request_id: 0, // TODO
             user_identity, // TODO
             nominal_hash_rate,
-            max_target: u256_from_int(u64::MAX), // TODO
-            min_extranonce_size: 8, // 8 is the max extranonce2 size the braiins pool supports
+            max_target: u256_max(),
+            min_extranonce_size: crate::MIN_EXTRANONCE2_SIZE,
         });
 
         // reset channel hashrate so downstreams can manage from now on out
@@ -650,4 +650,10 @@ pub fn proxy_extranonce1_len(
 ) -> usize {
     // full_extranonce_len - pool_extranonce1_len - miner_extranonce2 = tproxy_extranonce1_len
     channel_extranonce2_size - downstream_extranonce2_len
+}
+fn u256_max() -> U256<'static> {
+    // initialize u256 as a bytes vec of len 24
+    let u256 = vec![255_u8; 32];
+    let u256: U256 = u256.try_into().unwrap();
+    u256
 }

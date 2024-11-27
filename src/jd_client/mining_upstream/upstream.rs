@@ -99,8 +99,6 @@ pub struct Upstream {
     /// set by the SV2 Upstream via the SV2 `OpenExtendedMiningChannelSuccess` message.
     pub min_extranonce_size: u16,
     pub upstream_extranonce1_size: usize,
-    /// String be included in coinbase tx input scriptsig
-    pub pool_signature: String,
     /// Receives messages from the SV2 Upstream role
     //pub receiver: TReceiver<EitherFrame>,
     /// Sends messages to the SV2 Upstream role
@@ -129,14 +127,12 @@ impl Upstream {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         min_extranonce_size: u16,
-        pool_signature: String,
         sender: TSender<Mining<'static>>,
     ) -> ProxyResult<Arc<Mutex<Self>>> {
         Ok(Arc::new(Mutex::new(Self {
             channel_id: None,
             min_extranonce_size,
             upstream_extranonce1_size: 16, // 16 is the default since that is the only value the pool supports currently
-            pool_signature,
             sender,
             downstream: None,
             channel_factory: None,
@@ -361,7 +357,6 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
     ) -> Result<SendTo<Downstream>, RolesLogicError> {
         info!("Receive open extended mining channel success");
         let ids = Arc::new(Mutex::new(roles_logic_sv2::utils::GroupId::new()));
-        let pool_signature = self.pool_signature.clone();
         let prefix_len = m.extranonce_prefix.to_vec().len();
         let self_len = 0;
         let total_len = prefix_len + m.extranonce_size as usize;
@@ -383,8 +378,9 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             share_per_min,
             channel_kind,
             vec![],
-            pool_signature,
-        );
+            vec![],
+        )
+        .expect("Signature + extranonce lens exceed 32 bytes");
         let extranonce: Extranonce = m
             .extranonce_prefix
             .into_static()
