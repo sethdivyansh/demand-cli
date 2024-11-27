@@ -26,15 +26,6 @@ impl core::ops::Drop for AbortOnDrop {
     }
 }
 
-//pub async fn abort_all(to_abort: Vec<AbortOnDrop>) {
-//    for t in to_abort {
-//        t.abort_handle.abort();
-//        while !t.abort_handle.is_finished() {
-//            tokio::task::yield_now().await;
-//        }
-//    }
-//}
-
 impl<T: Send + 'static> From<JoinHandle<T>> for AbortOnDrop {
     fn from(value: JoinHandle<T>) -> Self {
         Self::new(value)

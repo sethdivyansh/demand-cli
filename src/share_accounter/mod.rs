@@ -2,11 +2,11 @@ mod task_manager;
 
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use demand_share_accounting_ext::*;
 use parser::{PoolExtMessages, ShareAccountingMessages};
 use roles_logic_sv2::{mining_sv2::SubmitSharesSuccess, parsers::Mining};
 use task_manager::TaskManager;
-use dashmap::DashMap;
 
 use crate::shared::utils::AbortOnDrop;
 
@@ -22,11 +22,11 @@ pub async fn start(
         .safe_lock(|t| t.get_aborter())
         .unwrap()
         .unwrap();
-    let relay_up_task = relay_up(receiver, up_sender,shares_sent_up.clone());
+    let relay_up_task = relay_up(receiver, up_sender, shares_sent_up.clone());
     TaskManager::add_relay_up(task_manager.clone(), relay_up_task)
         .await
         .expect("Task Manager failed");
-    let relay_down_task = relay_down(up_receiver, sender,shares_sent_up.clone());
+    let relay_down_task = relay_down(up_receiver, sender, shares_sent_up.clone());
     TaskManager::add_relay_down(task_manager.clone(), relay_down_task)
         .await
         .expect("Task Manager failed");
@@ -46,10 +46,13 @@ fn relay_up(
     let task = tokio::spawn(async move {
         while let Some(msg) = receiver.recv().await {
             if let Mining::SubmitSharesExtended(m) = &msg {
-                shares_sent_up.insert(m.job_id, ShareSentUp{
-                    channel_id: m.channel_id,
-                    sequence_number: m.sequence_number
-                });
+                shares_sent_up.insert(
+                    m.job_id,
+                    ShareSentUp {
+                        channel_id: m.channel_id,
+                        sequence_number: m.sequence_number,
+                    },
+                );
             };
             let msg = PoolExtMessages::Mining(msg);
             if up_sender.send(msg).await.is_err() {
@@ -74,7 +77,8 @@ fn relay_down(
                         let job_id = u32::from_le_bytes(job_id_bytes[4..8].try_into().unwrap());
                         let share_sent_up = shares_sent_up
                             .remove(&job_id)
-                            .expect("Pool sent invalid share success").1;
+                            .expect("Pool sent invalid share success")
+                            .1;
                         let success = Mining::SubmitSharesSuccess(SubmitSharesSuccess {
                             channel_id: share_sent_up.channel_id,
                             last_sequence_number: share_sent_up.sequence_number,
