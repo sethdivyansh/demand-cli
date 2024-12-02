@@ -31,7 +31,7 @@ pub type Message = PoolMessages<'static>;
 pub type SendTo = SendTo_<JobDeclaration<'static>, ()>;
 pub type StdFrame = StandardSv2Frame<Message>;
 
-mod setup_connection;
+pub mod setup_connection;
 use setup_connection::SetupConnectionHandler;
 
 use crate::shared::utils::AbortOnDrop;
