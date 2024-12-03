@@ -252,6 +252,7 @@ impl DownstreamMiningNode {
             }
             Ok(SendTo::None(None)) => (),
             Ok(m) => unreachable!("Unexpected message type: {:?}", m),
+            Err(Error::ShareDoNotMatchAnyJob) => warn!("Error: ShareDoNotMatchAnyJob"),
             Err(_) => todo!(),
         }
     }
@@ -464,8 +465,7 @@ impl
         match self
             .status
             .get_channel()
-            .on_submit_shares_extended(m.clone())
-            .unwrap()
+            .on_submit_shares_extended(m.clone())?
         {
             OnNewShare::SendErrorDownstream(s) => {
                 error!("Share do not meet downstream target");

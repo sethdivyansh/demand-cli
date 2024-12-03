@@ -87,9 +87,7 @@ impl JobDeclarator {
                 .await
                 .expect("impossible to connect");
 
-        SetupConnectionHandler::setup(&mut receiver, &mut sender, address)
-            .await
-            .unwrap();
+        SetupConnectionHandler::setup(&mut receiver, &mut sender, address).await?;
 
         info!("JD CONNECTED");
 

@@ -29,6 +29,7 @@ pub enum Error {
     TokioChannelErrorRecv(tokio::sync::broadcast::error::RecvError),
     Uint256Conversion(ParseLengthError),
     Infallible(std::convert::Infallible),
+    Unrecoverable,
 }
 
 impl fmt::Display for Error {
@@ -49,6 +50,7 @@ impl fmt::Display for Error {
             Uint256Conversion(ref e) => write!(f, "U256 Conversion Error: `{:?}`", e),
             VecToSlice32(ref e) => write!(f, "Standard Error: `{:?}`", e),
             Infallible(ref e) => write!(f, "Infallible Error:`{:?}`", e),
+            Unrecoverable => write!(f, "Unrecoverable Error"),
         }
     }
 }

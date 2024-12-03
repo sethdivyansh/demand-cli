@@ -375,8 +375,8 @@ dependencies = [
 
 [[package]]
 name = "demand-sv2-connection"
-version = "0.0.5"
-source = "git+https://github.com/demand-open-source/demand-sv2-connection#22d917970ec8879d8f485de2c1354cf05e310ac4"
+version = "0.0.6"
+source = "git+https://github.com/demand-open-source/demand-sv2-connection#6fdcaa780412e454ab92afadcddcc1efc0fc77b3"
 dependencies = [
  "binary_sv2",
  "codec_sv2",
