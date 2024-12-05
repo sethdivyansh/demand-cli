@@ -30,12 +30,12 @@ key-utils = "1.0.0"
 
 #demand-share-accounting-ext = {path = "../demand-share-accounting-ext"}
 #demand-sv2-connection = { path = "../demand-sv2-connection"}
-#roles_logic_sv2 = { path = "/home/user/src/stratum/protocols/v2/roles-logic-sv2"}
-#framing_sv2 = { path = "/home/user/src/stratum/protocols/v2/framing-sv2"}
-#binary_sv2 = { path = "/home/user/src/stratum/protocols/v2/binary-sv2/binary-sv2"}
-#noise_sv2 = {path ="/home/user/src/stratum/protocols/v2/noise-sv2"}
-#codec_sv2 = {features = ["noise_sv2","with_buffer_pool"], path = "/home/user/src/stratum/protocols/v2/codec-sv2" }
-#sv1_api = {path = "/home/user/src/stratum/protocols/v1" }
+#roles_logic_sv2 = { path = "../stratum/protocols/v2/roles-logic-sv2"}
+#framing_sv2 = { path = "../stratum/protocols/v2/framing-sv2"}
+#binary_sv2 = { path = "../stratum/protocols/v2/binary-sv2/binary-sv2"}
+#noise_sv2 = {path ="../stratum/protocols/v2/noise-sv2"}
+#codec_sv2 = {features = ["noise_sv2","with_buffer_pool"], path = "../stratum/protocols/v2/codec-sv2" }
+#sv1_api = {path = "../stratum/protocols/v1" }
 
 demand-share-accounting-ext = { git = "https://github.com/demand-open-source/share-accounting-ext"}
 demand-sv2-connection = {git = "https://github.com/demand-open-source/demand-sv2-connection"}

@@ -287,14 +287,20 @@ impl TemplateRx {
                                 }
                             }
                             Ok(m) => {
-                                error!("{:?}", m);
+                                error!("Unexpected next message {:?}", m);
                                 error!("{:?}", frame);
                                 error!("{:?}", frame.payload());
                                 error!("{:?}", frame.get_header());
                                 std::process::exit(1);
                             }
+                            Err(roles_logic_sv2::Error::NoValidTemplate(_)) => {
+                                // This can happen when we require data for a template, the TP
+                                // already sent a new set prev hash, but the client did not saw it
+                                // yet
+                                error!("Required txs for a non valid template id, ignoring it");
+                            }
                             Err(e) => {
-                                error!("{:?}", e);
+                                error!("Impossible to get next message {:?}", e);
                                 error!("{:?}", frame);
                                 error!("{:?}", frame.payload());
                                 error!("{:?}", frame.get_header());

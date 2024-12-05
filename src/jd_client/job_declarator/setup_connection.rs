@@ -51,7 +51,7 @@ impl SetupConnectionHandler {
         receiver: &mut TReceiver<EitherFrame>,
         sender: &mut TSender<EitherFrame>,
         proxy_address: SocketAddr,
-    ) -> Result<(), ()> {
+    ) -> Result<(), crate::jd_client::error::Error> {
         let setup_connection = Self::get_setup_connection_message(proxy_address);
 
         let sv2_frame: StdFrame = PoolMessages::Common(setup_connection.into())
@@ -59,7 +59,10 @@ impl SetupConnectionHandler {
             .unwrap();
         let sv2_frame = sv2_frame.into();
 
-        sender.send(sv2_frame).await.map_err(|_| ())?;
+        sender
+            .send(sv2_frame)
+            .await
+            .map_err(|_| crate::jd_client::error::Error::Unrecoverable)?;
 
         let mut incoming: StdFrame = receiver.recv().await.unwrap().try_into().unwrap();
 
@@ -70,8 +73,7 @@ impl SetupConnectionHandler {
             message_type,
             payload,
             CommonRoutingLogic::None,
-        )
-        .unwrap();
+        )?;
         Ok(())
     }
 }

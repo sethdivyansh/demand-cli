@@ -14,7 +14,7 @@ use tokio::{
     net::TcpStream,
     sync::mpsc::{Receiver, Sender},
 };
-use tracing::{debug, info};
+use tracing::{error, info};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
@@ -88,12 +88,15 @@ impl Router {
                 if best_pool == current_pool {
                     return None;
                 }
-                let current_latency = self
-                    .get_latency(current_pool)
-                    .await
-                    .expect("Error getting latency");
+                let current_latency = match self.get_latency(current_pool).await {
+                    Ok(latency) => latency,
+                    Err(e) => {
+                        error!("Failed to get latency: {:?}", e);
+                        return None;
+                    }
+                };
                 if best_pool_latency < (current_latency - epsilon) {
-                    debug!(
+                    info!(
                         "Found faster pool: {:?} with latency {:?}",
                         best_pool, best_pool_latency
                     );
@@ -127,6 +130,8 @@ impl Router {
                 .select_pool_connect()
                 .await
                 .ok_or(())
+                // Called when we initialize the proxy, without a pool we can not start mine and we
+                // fail
                 .expect("Failed to select pool"),
         };
         self.current_pool = Some(pool);
@@ -248,7 +253,7 @@ impl PoolLatency {
                         stream,
                         authority_public_key,
                     )
-                    .await;
+                    .await?;
 
                 // Set setup_channel latency
                 let setup_channel_timer = Instant::now();
@@ -265,10 +270,14 @@ impl PoolLatency {
                         let (send_to_down, mut recv_from_down) = tokio::sync::mpsc::channel(10);
                         let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
                         let channel = open_channel();
-                        send_from_down
+                        if send_from_down
                             .send(PoolExtMessages::Mining(channel))
                             .await
-                            .expect("Failed to send msg to pool");
+                            .is_err()
+                        {
+                            error!("Failed to send channel to pool");
+                            return Err(());
+                        }
 
                         let relay_up_task = minin_pool_connection::relay_up(recv_to_up, sender);
                         let relay_down_task =
@@ -325,26 +334,48 @@ impl PoolLatency {
             Ok(Ok(stream)) => {
                 if let Some(_tp_addr) = crate::TP_ADDRESS.as_ref() {
                     let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
+                        // Safe expect Key is a constant and must be right
                         .expect("Unable to create initialtor");
                     let (mut receiver, mut sender, _, _) =
-                        Connection::new(stream, HandshakeRole::Initiator(initiator))
-                            .await
-                            .expect("impossible to connect");
-                    SetupConnectionHandler::setup(&mut receiver, &mut sender, address)
-                        .await
-                        .expect("Failed to set up connection");
+                        match Connection::new(stream, HandshakeRole::Initiator(initiator)).await {
+                            Ok(connection) => connection,
+                            Err(e) => {
+                                error!("Failed to create jd connection: {:?}", e);
+                                return Err(());
+                            }
+                        };
+                    if let Err(e) =
+                        SetupConnectionHandler::setup(&mut receiver, &mut sender, address).await
+                    {
+                        error!("Failed to setup connection: {:?}", e);
+                        return Err(());
+                    }
 
                     self.open_sv2_jd_connection = Some(open_sv2_jd_connection_timer.elapsed());
 
                     let (sender, mut _receiver) = tokio::sync::mpsc::channel(10);
-                    let upstream = crate::jd_client::mining_upstream::Upstream::new(0, sender)
-                        .await
-                        .expect("Failed to create upstream");
+                    let upstream =
+                        match crate::jd_client::mining_upstream::Upstream::new(0, sender).await {
+                            Ok(upstream) => upstream,
+                            Err(e) => {
+                                error!("Failed to create upstream: {:?}", e);
+                                return Err(());
+                            }
+                        };
 
-                    let (job_declarator, _aborter) =
-                        JobDeclarator::new(address, authority_public_key.into_bytes(), upstream)
-                            .await
-                            .expect("Failed to instantiate job declarator");
+                    let (job_declarator, _aborter) = match JobDeclarator::new(
+                        address,
+                        authority_public_key.into_bytes(),
+                        upstream,
+                    )
+                    .await
+                    {
+                        Ok(new) => new,
+                        Err(e) => {
+                            error!("Failed to create job declarator: {:?}", e);
+                            return Err(());
+                        }
+                    };
 
                     // Set get_a_mining_token latency
                     let get_a_mining_token_timer = Instant::now();
@@ -371,6 +402,7 @@ fn open_channel() -> Mining<'static> {
             user_identity: "ABC"
                 .to_string()
                 .try_into()
+                // This can never fail
                 .expect("Failed to convert user identity to string"),
             nominal_hash_rate: 0.0,
         },
@@ -381,17 +413,26 @@ async fn initialize_mining_connections(
     setup_connection_msg: Option<SetupConnection<'static>>,
     stream: TcpStream,
     authority_public_key: Secp256k1PublicKey,
-) -> (
-    Receiver<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
-    Sender<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
-    SetupConnection<'static>,
-) {
+) -> Result<
+    (
+        Receiver<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
+        Sender<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
+        SetupConnection<'static>,
+    ),
+    (),
+> {
     let initiator =
+        // Safe expect Key is a constant and must be right
         Initiator::from_raw_k(authority_public_key.into_bytes()).expect("Invalid authority key");
-    let (receiver, sender, _, _) = Connection::new(stream, HandshakeRole::Initiator(initiator))
-        .await
-        .expect("Failed to create connection");
+    let (receiver, sender, _, _) =
+        match Connection::new(stream, HandshakeRole::Initiator(initiator)).await {
+            Ok(connection) => connection,
+            Err(e) => {
+                error!("Failed to create mining connection: {:?}", e);
+                return Err(());
+            }
+        };
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
-    (receiver, sender, setup_connection_msg)
+    Ok((receiver, sender, setup_connection_msg))
 }

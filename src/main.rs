@@ -77,6 +77,7 @@ async fn initialize_proxy(
     let (send_to_pool, recv_from_pool, pool_connection_abortable) = router
         .connect_pool(pool_addr)
         .await
+        // No upstream to connect we can fail
         .expect("Error connecting pool");
 
     let (downs_sv1_tx, downs_sv1_rx) = channel(10);
@@ -85,6 +86,7 @@ async fn initialize_proxy(
     let (translator_up_tx, mut translator_up_rx) = channel(10);
     let translator_abortable = translator::start(downs_sv1_rx, translator_up_tx)
         .await
+        // Impossible to start the proxy is ok to fail
         .expect("Impossible to initialize translator");
 
     let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
@@ -164,6 +166,6 @@ async fn monitor(
             }
             return;
         }
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
 }
