@@ -1,5 +1,6 @@
 use async_recursion::async_recursion;
 use jemallocator::Jemalloc;
+use roles_logic_sv2::utils::Mutex;
 use router::Router;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -7,7 +8,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
-use std::{net::ToSocketAddrs, time::Duration};
+use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info};
 
@@ -43,6 +44,9 @@ lazy_static! {
 }
 lazy_static! {
     static ref TP_ADDRESS: Option<String> = std::env::var("TP_ADDRESS").ok();
+}
+lazy_static! {
+    static ref PROXY_STATE: Arc<Mutex<ProxyState>> = Arc::new(Mutex::new(ProxyState::Ok));
 }
 
 #[tokio::main]
@@ -168,4 +172,32 @@ async fn monitor(
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
+}
+
+// To keep track of proxy global state
+#[derive(Debug, Clone, Copy)]
+pub enum ProxyState {
+    Ok,
+    NotOk,
+}
+
+// To keep track of the status of the Pool
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PoolState {
+    Up,
+    Down,
+}
+
+// Checks the states of Pool, and subsequently (Translator,JD, etc) and updates the ProxyState to either Ok or NotOk.
+fn _update_proxy_state(pool: PoolState) {
+    PROXY_STATE
+        .safe_lock(|state| {
+            // If any of the states is "Down", we change the ProxyState to NotOk.
+            if pool == PoolState::Down {
+                *state = ProxyState::NotOk;
+            } else {
+                *state = ProxyState::Ok;
+            }
+        })
+        .unwrap();
 }
