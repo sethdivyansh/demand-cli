@@ -46,7 +46,8 @@ lazy_static! {
     static ref TP_ADDRESS: Option<String> = std::env::var("TP_ADDRESS").ok();
 }
 lazy_static! {
-    static ref PROXY_STATE: Arc<Mutex<ProxyState>> = Arc::new(Mutex::new(ProxyState::Ok));
+    static ref PROXY_STATE: Arc<Mutex<ProxyState>> =
+        Arc::new(Mutex::new(ProxyState::Pool(PoolState::Up)));
 }
 
 #[tokio::main]
@@ -177,8 +178,7 @@ async fn monitor(
 // To keep track of proxy global state
 #[derive(Debug, Clone, Copy)]
 pub enum ProxyState {
-    Ok,
-    NotOk,
+    Pool(PoolState),
 }
 
 // To keep track of the status of the Pool
@@ -188,16 +188,18 @@ pub enum PoolState {
     Down,
 }
 
-// Checks the states of Pool, and subsequently (Translator,JD, etc) and updates the ProxyState to either Ok or NotOk.
+// Checks the states of Pool, and subsequently (Translator,JD, etc) and updates the ProxyState to show the state.
 fn _update_proxy_state(pool: PoolState) {
-    PROXY_STATE
-        .safe_lock(|state| {
-            // If any of the states is "Down", we change the ProxyState to NotOk.
-            if pool == PoolState::Down {
-                *state = ProxyState::NotOk;
-            } else {
-                *state = ProxyState::Ok;
-            }
+    if PROXY_STATE
+        .safe_lock(|proxy_state| {
+            // If any of the states is "Down", we change the ProxyState to reflect that.
+            *proxy_state = match pool {
+                PoolState::Down => ProxyState::Pool(PoolState::Down),
+                _ => ProxyState::Pool(PoolState::Up),
+            };
         })
-        .unwrap();
+        .is_err()
+    {
+        error!("Error updating proxy state");
+    }
 }

@@ -22,7 +22,6 @@ use crate::{
 };
 
 /// Router handles connection to Multiple upstreams.
-
 pub struct Router {
     pool_addresses: Vec<SocketAddr>,
     current_pool: Option<SocketAddr>,
