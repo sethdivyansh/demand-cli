@@ -79,11 +79,15 @@ async fn initialize_proxy(
     epsilon: Duration,
 ) {
     // Initial setup for the proxy
-    let (send_to_pool, recv_from_pool, pool_connection_abortable) = router
-        .connect_pool(pool_addr)
-        .await
-        // No upstream to connect we can fail
-        .expect("Error connecting pool");
+    let (send_to_pool, recv_from_pool, pool_connection_abortable) =
+        match router.connect_pool(pool_addr).await {
+            Ok(connection) => connection,
+            Err(_) => {
+                error!("No upstream available. Retrying...");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                return initialize_proxy(router, pool_addr, epsilon).await;
+            }
+        };
 
     let (downs_sv1_tx, downs_sv1_rx) = channel(10);
     let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
@@ -169,12 +173,19 @@ async fn monitor(
             for (handle, _name) in abort_handles {
                 drop(handle);
             }
-            initialize_proxy(router, None, epsilon).await;
-            return;
+
+            // Check if the pool state is down, and if so, reinitialize the proxy.
+            if is_pool_down() {
+                error!("Proxy state is DOWN. Reinitializing proxy...");
+                initialize_proxy(router, None, epsilon).await;
+                return;
+            } else {
+                return; // Proxy is up
+            }
         }
 
-        // Check if the proxy state is down, and if so, reinitialize the proxy.
-        if is_proxy_down() {
+        // Check if the pool state is down, and if so, reinitialize the proxy.
+        if is_pool_down() {
             error!("Proxy state is DOWN. Reinitializing proxy...");
             drop(abort_handles); // Drop all abort handles
             initialize_proxy(router, None, epsilon).await;
@@ -215,7 +226,7 @@ fn _update_proxy_state(pool: PoolState) {
 }
 
 // Check if the proxy state is down
-fn is_proxy_down() -> bool {
+fn is_pool_down() -> bool {
     PROXY_STATE
         .safe_lock(|proxy_state| matches!(*proxy_state, ProxyState::Pool(PoolState::Down)))
         .unwrap_or(false)
