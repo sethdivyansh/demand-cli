@@ -169,8 +169,18 @@ async fn monitor(
             for (handle, _name) in abort_handles {
                 drop(handle);
             }
+            initialize_proxy(router, None, epsilon).await;
             return;
         }
+
+        // Check if the proxy state is down, and if so, reinitialize the proxy.
+        if is_proxy_down() {
+            error!("Proxy state is DOWN. Reinitializing proxy...");
+            drop(abort_handles); // Drop all abort handles
+            initialize_proxy(router, None, epsilon).await;
+            return;
+        }
+
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
 }
@@ -202,4 +212,11 @@ fn _update_proxy_state(pool: PoolState) {
     {
         error!("Error updating proxy state");
     }
+}
+
+// Check if the proxy state is down
+fn is_proxy_down() -> bool {
+    PROXY_STATE
+        .safe_lock(|proxy_state| matches!(*proxy_state, ProxyState::Pool(PoolState::Down)))
+        .unwrap_or(false)
 }
