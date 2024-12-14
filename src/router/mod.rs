@@ -75,7 +75,7 @@ impl Router {
             info!("Latency for upstream {:?} is {:?}", pool, latency);
             Some(pool)
         } else {
-            info!("No available pool");
+            //info!("No available pool");
             None
         }
     }
@@ -125,13 +125,14 @@ impl Router {
     > {
         let pool = match pool_addr {
             Some(addr) => addr,
-            None => self
-                .select_pool_connect()
-                .await
-                .ok_or(())
-                // Called when we initialize the proxy, without a pool we can not start mine and we
-                // fail
-                .expect("Failed to select pool"),
+            None => match self.select_pool_connect().await {
+                Some(addr) => addr,
+                // Called when we initialize the proxy, without a valid pool we can not start mine and we
+                // return Err
+                None => {
+                    return Err(());
+                }
+            },
         };
         self.current_pool = Some(pool);
 
