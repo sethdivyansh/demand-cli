@@ -232,7 +232,7 @@ pub enum Reconnect {
 }
 
 // Checks the states of Pool, and subsequently (Translator,JD, etc) and updates the ProxyState to show the state.
-fn _update_proxy_state(pool: PoolState) {
+pub fn update_proxy_state(pool: PoolState) {
     if PROXY_STATE
         .safe_lock(|proxy_state| {
             // If any of the states is "Down", we change the ProxyState to reflect that.

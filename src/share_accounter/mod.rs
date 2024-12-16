@@ -1,6 +1,7 @@
 mod task_manager;
 
 use std::sync::Arc;
+use tracing::error;
 
 use dashmap::DashMap;
 use demand_share_accounting_ext::*;
@@ -8,7 +9,7 @@ use parser::{PoolExtMessages, ShareAccountingMessages};
 use roles_logic_sv2::{mining_sv2::SubmitSharesSuccess, parsers::Mining};
 use task_manager::TaskManager;
 
-use crate::shared::utils::AbortOnDrop;
+use crate::{shared::utils::AbortOnDrop, update_proxy_state, PoolState};
 
 pub async fn start(
     receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
@@ -75,10 +76,17 @@ fn relay_down(
                     if let ShareAccountingMessages::ShareOk(msg) = msg {
                         let job_id_bytes = msg.ref_job_id.to_le_bytes();
                         let job_id = u32::from_le_bytes(job_id_bytes[4..8].try_into().unwrap());
-                        let share_sent_up = shares_sent_up
-                            .remove(&job_id)
-                            .expect("Pool sent invalid share success")
-                            .1;
+                        let share_sent_up = match shares_sent_up.remove(&job_id) {
+                            Some(shares) => shares.1,
+                            // job_id doesn't exist
+                            None => {
+                                error!("Pool sent invalid share success");
+                                // Set global pool state to Down
+                                update_proxy_state(PoolState::Down);
+                                return;
+                            }
+                        };
+
                         let success = Mining::SubmitSharesSuccess(SubmitSharesSuccess {
                             channel_id: share_sent_up.channel_id,
                             last_sequence_number: share_sent_up.sequence_number,
@@ -95,7 +103,12 @@ fn relay_down(
                         break;
                     }
                 }
-                _ => panic!("Pool send unexpected message on mining connection"),
+                _ => {
+                    //panic!("Pool send unexpected message on mining connection")
+                    //Instead of panicking we set the global pool state to down
+                    update_proxy_state(PoolState::Down);
+                    return;
+                }
             }
         }
     });
