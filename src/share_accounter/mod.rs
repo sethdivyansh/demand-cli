@@ -16,21 +16,37 @@ pub async fn start(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
     up_sender: tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
-) -> AbortOnDrop {
+) -> Result<AbortOnDrop, ()> {
     let task_manager = TaskManager::initialize();
     let shares_sent_up = Arc::new(DashMap::with_capacity(100));
-    let abortable = task_manager
-        .safe_lock(|t| t.get_aborter())
-        .unwrap()
-        .unwrap();
+    let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+        Ok(Some(abortable)) => Ok(abortable),
+        // Aborter is None
+        Ok(None) => {
+            error!("Failed to get Aborter: Not found.");
+            return Err(());
+        }
+        // Failed tp acquire lock
+        Err(_) => {
+            error!("Failed to acquire lock");
+            return Err(());
+        }
+    };
     let relay_up_task = relay_up(receiver, up_sender, shares_sent_up.clone());
-    TaskManager::add_relay_up(task_manager.clone(), relay_up_task)
+    if TaskManager::add_relay_up(task_manager.clone(), relay_up_task)
         .await
-        .expect("Task Manager failed");
+        .is_err()
+    {
+        error!("Failed to add Share accounter relay up task");
+    };
+
     let relay_down_task = relay_down(up_receiver, sender, shares_sent_up.clone());
-    TaskManager::add_relay_down(task_manager.clone(), relay_down_task)
+    if TaskManager::add_relay_down(task_manager.clone(), relay_down_task)
         .await
-        .expect("Task Manager failed");
+        .is_err()
+    {
+        error!("Failed to add Share accounter relay up task");
+    };
     abortable
 }
 
@@ -75,7 +91,7 @@ fn relay_down(
                 PoolExtMessages::ShareAccountingMessages(msg) => {
                     if let ShareAccountingMessages::ShareOk(msg) = msg {
                         let job_id_bytes = msg.ref_job_id.to_le_bytes();
-                        let job_id = u32::from_le_bytes(job_id_bytes[4..8].try_into().unwrap());
+                        let job_id = u32::from_le_bytes(job_id_bytes[4..8].try_into().expect("Internal error: job_id_bytes[4..8] can always be convertible into a u32"));
                         let share_sent_up = match shares_sent_up.remove(&job_id) {
                             Some(shares) => shares.1,
                             // job_id doesn't exist

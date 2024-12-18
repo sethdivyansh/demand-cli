@@ -123,23 +123,37 @@ async fn initialize_proxy(
                 )
                 .await,
             );
-            share_accounter_abortable = share_accounter::start(
+            share_accounter_abortable = match share_accounter::start(
                 from_jdc_to_share_accounter_recv,
                 from_share_accounter_to_jdc_send,
                 recv_from_pool,
                 send_to_pool,
             )
-            .await;
+            .await
+            {
+                Ok(abortable) => abortable,
+                Err(_) => {
+                    error!("Failed to start share_accounter");
+                    return;
+                }
+            }
         } else {
             jdc_abortable = None;
 
-            share_accounter_abortable = share_accounter::start(
+            share_accounter_abortable = match share_accounter::start(
                 jdc_from_translator_receiver,
                 jdc_to_translator_sender,
                 recv_from_pool,
                 send_to_pool,
             )
-            .await;
+            .await
+            {
+                Ok(abortable) => abortable,
+                Err(_) => {
+                    error!("Failed to start share_accounter");
+                    return;
+                }
+            };
         };
 
         // Collecting all abort handles

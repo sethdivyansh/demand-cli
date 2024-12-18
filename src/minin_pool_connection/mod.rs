@@ -76,22 +76,37 @@ pub async fn connect_pool(
     .is_ok()
     {
         let task_manager = TaskManager::initialize();
-        let abortable = task_manager
-            .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+            Ok(Some(abortable)) => Ok(abortable),
+            // Aborter is None
+            Ok(None) => {
+                error!("Failed to get Aborter: Not found.");
+                return Err(());
+            }
+            // Failed to acquire lock
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return Err(());
+            }
+        };
 
         let (send_to_down, recv_from_down) = tokio::sync::mpsc::channel(10);
         let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
         let relay_up_task = relay_up(recv_to_up, sender);
-        TaskManager::add_sv2_relay_up(task_manager.clone(), relay_up_task)
+        if TaskManager::add_sv2_relay_up(task_manager.clone(), relay_up_task)
             .await
-            .expect("Task Manager failed");
+            .is_err()
+        {
+            error!("Failed to add relay up task")
+        };
         let relay_down_task = relay_down(receiver, send_to_down);
-        TaskManager::add_sv2_relay_down(task_manager.clone(), relay_down_task)
+        if TaskManager::add_sv2_relay_down(task_manager.clone(), relay_down_task)
             .await
-            .expect("Task Manager failed");
-        Ok((send_from_down, recv_from_down, abortable))
+            .is_err()
+        {
+            error!("Failed to add relay up task")
+        };
+        Ok((send_from_down, recv_from_down, abortable?))
     } else {
         Err(())
     }
@@ -134,8 +149,10 @@ pub fn relay_down(
                         (extension, message_type, payload).try_into();
                     if let Ok(msg) = msg {
                         let msg = msg.into_static();
-                        if send.send(msg).await.is_err() {
-                            panic!("Internal Mining downstream not available");
+                        if let Err(e) = send.send(msg).await {
+                            error!("Failed to send message {}", e);
+                            break;
+                            //panic!("Internal Mining downstream not available: {e}");
                         }
                     } else {
                         error!("Mining Upstream send non Mining message. Disconnecting");
@@ -161,15 +178,27 @@ pub async fn mining_setup_connection(
     timer: std::time::Duration,
 ) -> Result<SetupConnectionSuccess, ()> {
     let msg = PoolExtMessages::Common(CommonMessages::SetupConnection(setup_conection));
-    let std_frame: StdFrame = msg.try_into().unwrap();
+    let std_frame: StdFrame = match msg.try_into() {
+        Ok(frame) => frame,
+        Err(_) => {
+            error!("Failed to convert PoolExtMessages to StdFrame.");
+            return Err(());
+        }
+    };
     let either_frame: EitherFrame = std_frame.into();
-    send.send(either_frame).await.unwrap();
+    if send.send(either_frame).await.is_err() {
+        error!("Failed to send Eitherframe");
+        return Err(());
+    }
     if let Ok(Some(msg)) = tokio::time::timeout(timer, recv.recv()).await {
         let mut msg: StdFrame = msg.try_into().map_err(|_| ())?;
         let header = msg.get_header().ok_or(())?;
         let message_type = header.msg_type();
         let payload = msg.payload();
-        let msg: CommonMessages<'_> = (message_type, payload).try_into().unwrap();
+        let msg: CommonMessages<'_> = match (message_type, payload).try_into() {
+            Ok(message) => message,
+            Err(_) => return Err(()),
+        };
         match msg {
             CommonMessages::SetupConnectionSuccess(s) => Ok(s),
             _ => Err(()),
@@ -180,10 +209,10 @@ pub async fn mining_setup_connection(
 }
 
 pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<'static> {
-    let endpoint_host = "0.0.0.0".to_string().into_bytes().try_into().unwrap();
-    let vendor = String::new().try_into().unwrap();
-    let hardware_version = String::new().try_into().unwrap();
-    let firmware = String::new().try_into().unwrap();
+    let endpoint_host = "0.0.0.0".to_string().into_bytes().try_into().expect("Internal error: this operation can not fail because the string 0.0.0.0 can always be converted into Inner");
+    let vendor = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
+    let hardware_version = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
+    let firmware = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
     let flags = match work_selection {
         false => 0b0000_0000_0000_0000_0000_0000_0000_0100,
         true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
@@ -193,7 +222,7 @@ pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<
     let device_id = format!("{}::POOLED::{}", device_id, token)
         .to_string()
         .try_into()
-        .unwrap();
+        .expect("Internal error: this operation can not fail because an device_id can always be converted into Inner");
     SetupConnection {
         protocol: Protocol::MiningProtocol,
         min_version: 2,
