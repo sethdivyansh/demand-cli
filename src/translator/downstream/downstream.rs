@@ -114,17 +114,21 @@ impl Downstream {
         }));
 
         // TODO handle error
-        start_receive_downstream(
+        if start_receive_downstream(
             task_manager.clone(),
             downstream.clone(),
             recv_from_down,
             connection_id,
         )
         .await
-        .unwrap();
+        .is_err()
+        {
+            error!("Failed yo start receive downstream task");
+            return;
+        };
 
         // TODO handle error
-        start_send_to_downstream(
+        if start_send_to_downstream(
             task_manager.clone(),
             receiver_outgoing,
             send_to_down,
@@ -132,9 +136,13 @@ impl Downstream {
             host.clone(),
         )
         .await
-        .unwrap();
+        .is_err()
+        {
+            error!("Failed to start send_to_downstream task");
+            return;
+        };
 
-        start_notify(
+        if start_notify(
             task_manager.clone(),
             downstream.clone(),
             rx_sv1_notify,
@@ -143,7 +151,10 @@ impl Downstream {
             connection_id,
         )
         .await
-        .unwrap();
+        .is_err()
+        {
+            error!("Failed to start notify task");
+        };
     }
 
     /// Accept connections from one or more SV1 Downstream roles (SV1 Mining Devices) and create a
@@ -156,10 +167,19 @@ impl Downstream {
         downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
     ) -> Result<AbortOnDrop, ()> {
         let task_manager = TaskManager::initialize();
-        let abortable = task_manager
-            .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+            Ok(Some(abortable)) => Ok(abortable),
+            // Aborter is None
+            Ok(None) => {
+                error!("Failed to get Aborter: Not found.");
+                return Err(());
+            }
+            // Failed to acquire lock
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return Err(());
+            }
+        };
         start_accept_connection(
             task_manager.clone(),
             tx_sv1_submit,
@@ -169,7 +189,7 @@ impl Downstream {
             downstreams,
         )
         .await?;
-        Ok(abortable)
+        abortable
     }
 
     /// As SV1 messages come in, determines if the message response needs to be translated to SV2
@@ -182,9 +202,7 @@ impl Downstream {
         // `handle_message` in `IsServer` trait + calls `handle_request`
         // TODO: Map err from V1Error to Error::V1Error
 
-        let response = self_
-            .safe_lock(|s| s.handle_message(message_sv1.clone()))
-            .unwrap();
+        let response = self_.safe_lock(|s| s.handle_message(message_sv1.clone()))?;
         match response {
             Ok(res) => {
                 if let Some(r) = res {
@@ -218,7 +236,10 @@ impl Downstream {
         self_: Arc<Mutex<Self>>,
         response: json_rpc::Message,
     ) -> Result<(), SendError<sv1_api::Message>> {
-        let sender = self_.safe_lock(|s| s.tx_outgoing.clone()).unwrap();
+        let sender = match self_.safe_lock(|s| s.tx_outgoing.clone()) {
+            Ok(sender) => sender,
+            Err(_) => return Ok(()),
+        };
         sender.send(response).await
     }
 
@@ -333,9 +354,15 @@ impl IsServer<'static> for Downstream {
                 extranonce2_len: self.extranonce2_len,
                 version_rolling_mask: self.version_rolling_mask.clone(),
             };
-            self.tx_sv1_bridge
+            if self
+                .tx_sv1_bridge
                 .try_send(DownstreamMessages::SubmitShares(to_send))
-                .unwrap();
+                .is_err()
+            {
+                error!("Failed to start receive downstream task");
+                // Return false because submit was not properly handled
+                return false;
+            };
         };
         true
     }
@@ -359,12 +386,12 @@ impl IsServer<'static> for Downstream {
         &mut self,
         _extranonce1: Option<Extranonce<'static>>,
     ) -> Extranonce<'static> {
-        self.extranonce1.clone().try_into().unwrap()
+        self.extranonce1.clone().try_into().expect("Internal error: this opration can not fail because the Vec<U8> can always be converted into Extranonce")
     }
 
     /// Returns the `Downstream`'s `extranonce1` value.
     fn extranonce1(&self) -> Extranonce<'static> {
-        self.extranonce1.clone().try_into().unwrap()
+        self.extranonce1.clone().try_into().expect("Internal error: this opration can not fail because the Vec<U8> can always be converted into Extranonce")
     }
 
     /// Sets the `extranonce2_size` field sent in the SV1 `mining.notify` message to the value

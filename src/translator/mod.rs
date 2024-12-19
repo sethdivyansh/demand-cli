@@ -7,6 +7,7 @@ mod upstream;
 use bitcoin::Address;
 
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
+use tracing::error;
 
 use std::{net::IpAddr, sync::Arc};
 use tokio::sync::mpsc::channel;
@@ -30,17 +31,31 @@ pub async fn start(
     )>,
 ) -> Result<AbortOnDrop, ()> {
     let task_manager = TaskManager::initialize(pool_connection.clone());
-    let abortable = task_manager
-        .safe_lock(|t| t.get_aborter())
-        .unwrap()
-        .unwrap();
+    let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+        Ok(Some(abortable)) => Ok(abortable),
+        // Aborter is None
+        Ok(None) => {
+            error!("Failed to get Aborter: Not found.");
+            return Err(());
+        }
+        // Failed to acquire lock
+        Err(_) => {
+            error!("Failed to acquire lock");
+            return Err(());
+        }
+    };
 
     let (send_to_up, up_recv_from_here) = channel(crate::TRANSLATOR_BUFFER_SIZE);
     let (up_send_to_here, recv_from_up) = channel(crate::TRANSLATOR_BUFFER_SIZE);
-    pool_connection
+    if pool_connection
         .send((up_send_to_here, up_recv_from_here, None))
         .await
-        .unwrap();
+        .is_err()
+    {
+        error!("Failed to send channels to the pool");
+        //? should return
+        return Err(());
+    };
 
     // `tx_sv1_bridge` sender is used by `Downstream` to send a `DownstreamMessages` message to
     // `Bridge` via the `rx_sv1_downstream` receiver
@@ -100,18 +115,32 @@ pub async fn start(
     };
 
     let upstream_abortable =
-        upstream::Upstream::start(upstream, recv_from_up, rx_sv2_submit_shares_ext)
-            .await
-            .unwrap();
+        upstream::Upstream::start(upstream, recv_from_up, rx_sv2_submit_shares_ext).await?;
     TaskManager::add_upstream(task_manager.clone(), upstream_abortable).await?;
 
     let startup_task = {
         let target = target.clone();
         let task_manager = task_manager.clone();
         tokio::task::spawn(async move {
-            let (extended_extranonce, up_id) = rx_sv2_extranonce.recv().await.unwrap();
+            let (extended_extranonce, up_id) = match rx_sv2_extranonce.recv().await {
+                Some((extended_extranonce, up_id)) => (extended_extranonce, up_id),
+                None => {
+                    error!("Failed to receive from rx_sv2_extranonce");
+                    // Set Translator global state to Down here later
+                    return; // Exit
+                }
+            };
+
             loop {
-                let target: [u8; 32] = target.safe_lock(|t| t.clone()).unwrap().try_into().unwrap();
+                let target: [u8; 32] = match target.safe_lock(|t| t.clone()) {
+                    Ok(target) => {
+                        target.try_into().expect("Internal error: this operation cannot fail because the target Vec<u8> can always be converted into [u8; 32]")
+                    },
+                    Err(_) => {
+                        error!("Failed to  acquire lock");
+                         return
+                    }
+                };
                 if target != [0; 32] {
                     break;
                 };
@@ -119,23 +148,35 @@ pub async fn start(
             }
 
             // Instantiate a new `Bridge` and begins handling incoming messages
-            let b = proxy::Bridge::new(
+            let b = match proxy::Bridge::new(
                 tx_sv2_submit_shares_ext,
                 tx_sv1_notify.clone(),
                 extended_extranonce,
                 target,
                 up_id,
-            );
-            let bridge_aborter = proxy::Bridge::start(
+            ) {
+                Ok(b) => b,
+                Err(_) => {
+                    error!("Error instantiating new Bridge");
+                    return;
+                }
+            };
+            let bridge_aborter = match proxy::Bridge::start(
                 b.clone(),
                 rx_sv2_set_new_prev_hash,
                 rx_sv2_new_ext_mining_job,
                 rx_sv1_bridge,
             )
             .await
-            .unwrap();
+            {
+                Ok(aborter) => aborter,
+                Err(_) => {
+                    error!("Failed to get bridge aborter");
+                    return; // Exit
+                }
+            };
 
-            let downstream_aborter = downstream::Downstream::accept_connections(
+            let downstream_aborter = match downstream::Downstream::accept_connections(
                 tx_sv1_bridge,
                 tx_sv1_notify,
                 b,
@@ -143,19 +184,34 @@ pub async fn start(
                 downstreams,
             )
             .await
-            .unwrap();
+            {
+                Ok(aborter) => aborter,
+                Err(_) => {
+                    error!("Failed to get bridge aborter");
+                    return; // Exit
+                }
+            };
 
-            TaskManager::add_bridge(task_manager.clone(), bridge_aborter)
+            if TaskManager::add_bridge(task_manager.clone(), bridge_aborter)
                 .await
-                .unwrap();
-            TaskManager::add_downstream_listener(task_manager.clone(), downstream_aborter)
+                .is_err()
+            {
+                error!("Failed to add statup task to task manager")
+            };
+            if TaskManager::add_downstream_listener(task_manager.clone(), downstream_aborter)
                 .await
-                .unwrap();
+                .is_err()
+            {
+                error!("Failed to add downstream listener task to task manager")
+            };
         })
     };
-    TaskManager::add_startup_task(task_manager.clone(), startup_task.into())
+    if TaskManager::add_startup_task(task_manager.clone(), startup_task.into())
         .await
-        .unwrap();
+        .is_err()
+    {
+        error!("Failed to add startup task to task manager")
+    };
 
-    Ok(abortable)
+    abortable
 }

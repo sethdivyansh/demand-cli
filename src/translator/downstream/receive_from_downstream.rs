@@ -26,9 +26,12 @@ pub async fn start_receive_downstream(
                     }
                 }
                 // TODO handle panic
-                Downstream::handle_incoming_sv1(downstream.clone(), incoming)
-                    .await
-                    .unwrap();
+                if let Err(error) =
+                    Downstream::handle_incoming_sv1(downstream.clone(), incoming).await
+                {
+                    error!("Failed to handle incoming sv1 msg: {:?}", error);
+                    break;
+                };
             } else {
                 break;
             }

@@ -12,6 +12,7 @@ use roles_logic_sv2::{
     mining_sv2::UpdateChannel, parsers::Mining, utils::Mutex, Error as RolesLogicError,
 };
 use std::{sync::Arc, time::Duration};
+use tracing::error;
 
 impl Upstream {
     /// this function checks if the elapsed time since the last update has surpassed the config
@@ -33,7 +34,10 @@ impl Upstream {
         };
         let message = Mining::UpdateChannel(update_channel);
 
-        tx_message.send(message).await.unwrap();
+        if tx_message.send(message).await.is_err() {
+            error!("Failed to send message");
+            return Err(crate::translator::error::Error::AsyncChannelError);
+        }
         tokio::time::sleep(Duration::from_secs(timeout as u64)).await;
         Ok(())
     }

@@ -32,7 +32,7 @@ use tokio::{
     sync::mpsc::{Receiver as TReceiver, Sender as TSender},
     task,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::task_manager::TaskManager;
 use crate::shared::utils::AbortOnDrop;
@@ -132,10 +132,17 @@ impl Upstream {
         rx_sv2_submit_shares_ext: TReceiver<SubmitSharesExtended<'static>>,
     ) -> Result<AbortOnDrop, ()> {
         let task_manager = TaskManager::initialize();
-        let abortable = task_manager
-            .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+            Ok(Some(abortable)) => Ok(abortable),
+            Ok(None) => {
+                error!("Failed to get Aborter: Not found.");
+                return Err(());
+            }
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return Err(());
+            }
+        };
 
         Self::connect(self_.clone()).await.map_err(|_| ())?;
 
@@ -149,7 +156,7 @@ impl Upstream {
         TaskManager::add_main_loop(task_manager.clone(), main_loop_abortable).await?;
         TaskManager::add_handle_submit(task_manager.clone(), handle_submit_abortable).await?;
 
-        Ok(abortable)
+        abortable
     }
 
     /// Setups the connection with the SV2 Upstream role (most typically a SV2 Pool).
@@ -166,7 +173,7 @@ impl Upstream {
                     .map_err(|_e| PoisonLock)
             })
             .map_err(|_e| PoisonLock)??;
-        let user_identity = "ABC".to_string().try_into().unwrap();
+        let user_identity = "ABC".to_string().try_into().expect("Internal error: this opration can not fail because the string ABC can always be converted into Inner");
         let open_channel = Mining::OpenExtendedMiningChannel(OpenExtendedMiningChannel {
             request_id: 0, // TODO
             user_identity, // TODO
@@ -184,7 +191,10 @@ impl Upstream {
             })
             .map_err(|_e| PoisonLock)??;
 
-        sender.send(open_channel).await.unwrap();
+        if sender.send(open_channel).await.is_err() {
+            error!("Failed to send message");
+            return Err(crate::translator::error::Error::AsyncChannelError);
+        };
         Ok(())
     }
 
@@ -239,7 +249,10 @@ impl Upstream {
                         // No translation required, simply respond to SV2 pool w a SV2 message
                         Ok(SendTo::Respond(message_for_upstream)) => {
                             // Relay the response message to the Upstream role
-                            tx_frame.send(message_for_upstream).await.unwrap();
+                            if tx_frame.send(message_for_upstream).await.is_err() {
+                                error!("Failed to send message to upstream role");
+                                break;
+                            };
                         }
                         // Does not send the messages anywhere, but instead handle them internally
                         Ok(SendTo::None(Some(m))) => {
@@ -247,12 +260,16 @@ impl Upstream {
                                 Mining::OpenExtendedMiningChannelSuccess(m) => {
                                     let prefix_len = m.extranonce_prefix.len();
                                     // update upstream_extranonce1_size for tracking
-                                    let miner_extranonce2_size = self_
-                                        .safe_lock(|u| {
-                                            u.upstream_extranonce1_size = prefix_len;
-                                            u.min_extranonce_size as usize
-                                        })
-                                        .unwrap();
+                                    let miner_extranonce2_size = match self_.safe_lock(|u| {
+                                        u.upstream_extranonce1_size = prefix_len;
+                                        u.min_extranonce_size as usize
+                                    }) {
+                                        Ok(extranounce1_size) => extranounce1_size,
+                                        Err(_) => {
+                                            error!("Failed to update extranounce1 size");
+                                            break;
+                                        }
+                                    };
                                     let extranonce_prefix: Extranonce = m.extranonce_prefix.into();
                                     // Create the extended extranonce that will be saved in bridge and
                                     // it will be used to open downstream (sv1) channels
@@ -268,26 +285,51 @@ impl Upstream {
                                     let range_1 = prefix_len..prefix_len + tproxy_e1_len; // downstream extranonce1
                                     let range_2 = prefix_len + tproxy_e1_len
                                         ..prefix_len + m.extranonce_size as usize; // extranonce2
-                                    let extended = ExtendedExtranonce::from_upstream_extranonce(
+                                    let extended = match ExtendedExtranonce::from_upstream_extranonce(
                                         extranonce_prefix.clone(), range_0.clone(), range_1.clone(), range_2.clone(),
                                     ).ok_or_else(|| InvalidExtranonce(format!("Impossible to create a valid extended extranonce from {:?} {:?} {:?} {:?}",
-                                        extranonce_prefix,range_0,range_1,range_2)));
-                                    tx_sv2_extranonce
-                                        .send((extended.unwrap(), m.channel_id))
+                                        extranonce_prefix,range_0,range_1,range_2))) {
+                                            Ok(extended_extranounce) => extended_extranounce,
+                                            Err(_) => {
+                                                error!(
+                                                    "Failed to create a valid extended extranonce from {:?} {:?} {:?} {:?}",
+                                                    extranonce_prefix, range_0, range_1, range_2
+                                                );
+                                                break;
+                                            }
+                                        };
+
+                                    if tx_sv2_extranonce
+                                        .send((extended, m.channel_id))
                                         .await
-                                        .unwrap();
+                                        .is_err()
+                                    {
+                                        error!("Failed to send extended extranounce");
+                                        break;
+                                    };
                                 }
                                 Mining::NewExtendedMiningJob(m) => {
                                     let job_id = m.job_id;
-                                    self_
+
+                                    if self_
                                         .safe_lock(|s| {
                                             let _ = s.job_id.insert(job_id);
                                         })
-                                        .unwrap();
-                                    tx_sv2_new_ext_mining_job.send(m).await.unwrap();
+                                        .is_err()
+                                    {
+                                        error!("Failed to insert job_id");
+                                        break;
+                                    };
+                                    if tx_sv2_new_ext_mining_job.send(m).await.is_err() {
+                                        error!("Failed to send NewExtendedMiningJob");
+                                        break;
+                                    };
                                 }
                                 Mining::SetNewPrevHash(m) => {
-                                    tx_sv2_set_new_prev_hash.send(m).await.unwrap();
+                                    if tx_sv2_set_new_prev_hash.send(m).await.is_err() {
+                                        error!("Failed to send SetNewPrevHash");
+                                        break;
+                                    };
                                 }
                                 Mining::CloseChannel(_m) => {
                                     todo!()
@@ -350,7 +392,13 @@ impl Upstream {
             let self_ = self_.clone();
             task::spawn(async move {
                 loop {
-                    let mut sv2_submit: SubmitSharesExtended = rx_submit.recv().await.unwrap();
+                    let mut sv2_submit: SubmitSharesExtended = match rx_submit.recv().await {
+                        Some(msg) => msg,
+                        None => {
+                            error!("Failed to receive message");
+                            return;
+                        }
+                    };
 
                     let channel_id = self_
                         .safe_lock(|s| {
@@ -360,14 +408,45 @@ impl Upstream {
                                 ))
                         })
                         .map_err(|_e| PoisonLock);
-                    sv2_submit.channel_id = channel_id.unwrap().unwrap();
+                    sv2_submit.channel_id = match channel_id {
+                        Ok(Ok(channel_id)) => channel_id,
+                        Ok(Err(_)) => {
+                            // error retrieving channel_id
+                            error!("Failed to retrieve channel_id");
+                            break;
+                        }
+                        Err(_) => {
+                            //unable to set channel_id
+                            error!("Failed to set sv2_submut channel_id");
+                            //? should break
+                            break;
+                        }
+                    };
+
                     let job_id = Self::get_job_id(&self_);
-                    sv2_submit.job_id = job_id.unwrap().unwrap();
+                    sv2_submit.job_id = match job_id {
+                        Ok(Ok(job_id)) => job_id,
+                        Ok(Err(_)) => {
+                            // error retrieving job_id
+                            error!("Failed to retrieve job_id");
+                            //? should break
+                            break;
+                        }
+                        Err(_) => {
+                            //unable to set job_id
+                            error!("Failed to set sv2_submut job_id");
+                            //? should break
+                            break;
+                        }
+                    };
 
                     let message =
                         roles_logic_sv2::parsers::Mining::SubmitSharesExtended(sv2_submit);
 
-                    tx_frame.send(message).await.unwrap();
+                    if tx_frame.send(message).await.is_err() {
+                        error!("Unable to send SubmitSharesExtended msg upstream");
+                        break;
+                    };
                 }
             })
         };
@@ -654,6 +733,6 @@ pub fn proxy_extranonce1_len(
 fn u256_max() -> U256<'static> {
     // initialize u256 as a bytes vec of len 24
     let u256 = vec![255_u8; 32];
-    let u256: U256 = u256.try_into().unwrap();
+    let u256: U256 = u256.try_into().expect("Internal error: this operation can not fail because the vec![255_u8; 32] can always be converted into U256");
     u256
 }

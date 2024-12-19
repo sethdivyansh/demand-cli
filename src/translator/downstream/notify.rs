@@ -31,15 +31,29 @@ pub async fn start_notify(
                     }
                 };
                 if is_a && !first_sent && last_notify.is_some() {
-                    Downstream::init_difficulty_management(&downstream)
+                    if Downstream::init_difficulty_management(&downstream)
                         .await
-                        .unwrap();
+                        .is_err()
+                    {
+                        error!("Failed to initialize difficult management");
+                        break;
+                    };
 
-                    let sv1_mining_notify_msg = last_notify.clone().unwrap();
+                    let sv1_mining_notify_msg = match last_notify.clone() {
+                        Some(sv1_mining_notify_msg) => sv1_mining_notify_msg,
+                        None => {
+                            error!("sv1_mining_notify_msg is None");
+                            break;
+                        }
+                    };
                     let message: json_rpc::Message = sv1_mining_notify_msg.into();
-                    Downstream::send_message_downstream(downstream.clone(), message)
+                    if Downstream::send_message_downstream(downstream.clone(), message)
                         .await
-                        .unwrap();
+                        .is_err()
+                    {
+                        error!("Failed to send msg downstream");
+                        break;
+                    };
                     if let Err(e) = downstream.clone().safe_lock(|s| {
                         s.first_job_received = true;
                     }) {
@@ -57,9 +71,13 @@ pub async fn start_notify(
                     };
 
                     while let Ok(sv1_mining_notify_msg) = rx_sv1_notify.recv().await {
-                        downstream
+                        if downstream
                             .safe_lock(|d| d.last_notify = Some(sv1_mining_notify_msg.clone()))
-                            .unwrap();
+                            .is_err()
+                        {
+                            error!("Failed to acquire lock");
+                            return;
+                        };
                         let message: json_rpc::Message = sv1_mining_notify_msg.into();
                         if Downstream::send_message_downstream(downstream.clone(), message)
                             .await
@@ -100,7 +118,13 @@ async fn start_update(
     let handle = task::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-            let ln = downstream.safe_lock(|d| d.last_notify.clone()).unwrap();
+            let ln = match downstream.safe_lock(|d| d.last_notify.clone()) {
+                Ok(ln) => ln,
+                Err(_) => {
+                    error!("Failed to acquire lock");
+                    return;
+                }
+            };
             assert!(ln.is_some());
             // if hashrate has changed, update difficulty management, and send new
             // mining.set_difficulty

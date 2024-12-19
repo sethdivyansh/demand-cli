@@ -29,10 +29,15 @@ pub async fn start_accept_connection(
                 info!("Translator opening connection for ip {}", addr);
                 // TODO handle also cases where a cpuminer want to connect
                 let expected_hash_rate = crate::EXPECTED_SV1_HASHPOWER;
-                Bridge::ready(&bridge).await;
-                let open_sv1_downstream = bridge
-                    .safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate))
-                    .unwrap();
+                if Bridge::ready(&bridge).await.is_err() {
+                    error!("Bridge not ready");
+                    break;
+                };
+                let open_sv1_downstream =
+                    match bridge.safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate)) {
+                        Ok(open_sv1_downstream) => open_sv1_downstream,
+                        Err(_) => break,
+                    };
 
                 match open_sv1_downstream {
                     Ok(opened) => {
