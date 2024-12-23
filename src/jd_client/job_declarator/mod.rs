@@ -96,8 +96,8 @@ impl JobDeclarator {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
             .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+            .map_err(|_| Error::PoisonLock)?
+            .ok_or(Error::Unrecoverable)?; // Better Error to return here ?
         let self_ = Arc::new(Mutex::new(JobDeclarator {
             sender,
             allocated_tokens: vec![],
@@ -107,8 +107,8 @@ impl JobDeclarator {
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
             up,
-            coinbase_tx_prefix: vec![].try_into().unwrap(),
-            coinbase_tx_suffix: vec![].try_into().unwrap(),
+            coinbase_tx_prefix: vec![].try_into().expect("Internal error: this operation can not fail because the Vec can always be converted into Inner"),
+            coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because the Vec can always be converted into Inner"),
             set_new_prev_hash_counter: 0,
             task_manager,
         }));
@@ -118,13 +118,17 @@ impl JobDeclarator {
         Ok((self_, abortable))
     }
 
-    fn get_last_declare_job_sent(self_mutex: &Arc<Mutex<Self>>, request_id: u32) -> LastDeclareJob {
+    fn get_last_declare_job_sent(
+        self_mutex: &Arc<Mutex<Self>>,
+        request_id: u32,
+    ) -> Result<LastDeclareJob, ()> {
         let id = self_mutex
             .safe_lock(|s| s.last_declare_mining_jobs_sent.remove(&request_id).clone())
-            .unwrap();
-        id.expect("Impossible to get last declare job sent")
+            .map_err(|_| ())?;
+        Ok(id
+            .expect("Impossible to get last declare job sent")
             .clone()
-            .expect("This is ok")
+            .expect("This is ok"))
     }
 
     fn update_last_declare_job_sent(
@@ -132,7 +136,7 @@ impl JobDeclarator {
         request_id: u32,
         j: LastDeclareJob,
     ) {
-        self_mutex
+        if self_mutex
             .safe_lock(|s| {
                 //check hashmap size in order to not let it grow indefinetely
                 if s.last_declare_mining_jobs_sent.len() < 10 {
@@ -143,15 +147,22 @@ impl JobDeclarator {
                     s.last_declare_mining_jobs_sent.insert(request_id, Some(j));
                 }
             })
-            .unwrap();
+            .is_err()
+        {
+            error!("Failed to acquire lock");
+        }
     }
 
     #[async_recursion]
     pub async fn get_last_token(
         self_mutex: &Arc<Mutex<Self>>,
-    ) -> AllocateMiningJobTokenSuccess<'static> {
-        let mut token_len = self_mutex.safe_lock(|s| s.allocated_tokens.len()).unwrap();
-        let task_manager = self_mutex.safe_lock(|s| s.task_manager.clone()).unwrap();
+    ) -> Result<AllocateMiningJobTokenSuccess<'static>, ()> {
+        let mut token_len = self_mutex
+            .safe_lock(|s| s.allocated_tokens.len())
+            .map_err(|_| ())?;
+        let task_manager = self_mutex
+            .safe_lock(|s| s.task_manager.clone())
+            .map_err(|_| ())?;
         match token_len {
             0 => {
                 {
@@ -161,15 +172,15 @@ impl JobDeclarator {
                             Self::allocate_tokens(&self_mutex, 2).await;
                         })
                     };
-                    TaskManager::add_allocate_tokens(task_manager, task.into())
-                        .await
-                        .unwrap();
+                    TaskManager::add_allocate_tokens(task_manager, task.into()).await?;
                 }
 
                 // we wait for token allocation to avoid infinite recursion
                 while token_len == 0 {
                     tokio::task::yield_now().await;
-                    token_len = self_mutex.safe_lock(|s| s.allocated_tokens.len()).unwrap();
+                    token_len = self_mutex
+                        .safe_lock(|s| s.allocated_tokens.len())
+                        .map_err(|_| ())?;
                 }
 
                 Self::get_last_token(self_mutex).await
@@ -182,21 +193,19 @@ impl JobDeclarator {
                             Self::allocate_tokens(&self_mutex, 1).await;
                         })
                     };
-                    TaskManager::add_allocate_tokens(task_manager, task.into())
-                        .await
-                        .unwrap();
+                    TaskManager::add_allocate_tokens(task_manager, task.into()).await?;
                 }
                 // There is a token, unwrap is safe
-                self_mutex
+                Ok(self_mutex
                     .safe_lock(|s| s.allocated_tokens.pop())
-                    .unwrap()
-                    .unwrap()
+                    .map_err(|_| ())?
+                    .unwrap())
             }
             // There are tokens, unwrap is safe
-            _ => self_mutex
+            _ => Ok(self_mutex
                 .safe_lock(|s| s.allocated_tokens.pop())
-                .unwrap()
-                .unwrap(),
+                .map_err(|_| ())?
+                .unwrap()),
         }
     }
 
@@ -208,27 +217,48 @@ impl JobDeclarator {
         excess_data: B064K<'static>,
         coinbase_pool_output: Vec<u8>,
     ) {
-        let (id, _, sender) = self_mutex
+        let (id, _, sender) = match self_mutex
             .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
-            .unwrap();
+        {
+            Ok((id, extranounce_size, sender)) => (id, extranounce_size, sender),
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return;
+            }
+        };
         // TODO: create right nonce
         let tx_short_hash_nonce = 0;
         let mut tx_list: Vec<Transaction> = Vec::new();
         for tx in tx_list_.to_vec() {
-            //TODO remove unwrap
-            let tx = Transaction::deserialize(&tx).unwrap();
-            tx_list.push(tx);
+            match Transaction::deserialize(&tx) {
+                Ok(tx) => tx_list.push(tx),
+                Err(_) => {
+                    error!("Failed to deserailize transaction");
+                    return;
+                }
+            }
         }
+        let coinbase_prefix =
+            if let Ok(coinbase_prefix) = self_mutex.safe_lock(|s| s.coinbase_tx_prefix.clone()) {
+                coinbase_prefix
+            } else {
+                error!("Failed to acquire lock");
+                return;
+            };
+        let coinbase_suffix =
+            if let Ok(coinbase_prefix) = self_mutex.safe_lock(|s| s.coinbase_tx_suffix.clone()) {
+                coinbase_prefix
+            } else {
+                error!("Failed to acquire lock");
+                return;
+            };
+
         let declare_job = DeclareMiningJob {
             request_id: id,
-            mining_job_token: token.try_into().unwrap(),
+            mining_job_token: token.try_into().expect("Internal error: this operation can not fail because the Vec<U8> can always be converted into Inner"),
             version: template.version,
-            coinbase_prefix: self_mutex
-                .safe_lock(|s| s.coinbase_tx_prefix.clone())
-                .unwrap(),
-            coinbase_suffix: self_mutex
-                .safe_lock(|s| s.coinbase_tx_suffix.clone())
-                .unwrap(),
+            coinbase_prefix,
+            coinbase_suffix,
             tx_short_hash_nonce,
             tx_short_hash_list: hash_lists_tuple(tx_list.clone(), tx_short_hash_nonce).0,
             tx_hash_list_hash: hash_lists_tuple(tx_list.clone(), tx_short_hash_nonce).1,
@@ -242,27 +272,45 @@ impl JobDeclarator {
         };
         Self::update_last_declare_job_sent(self_mutex, id, last_declare);
         let frame: StdFrame =
-            PoolMessages::JobDeclaration(JobDeclaration::DeclareMiningJob(declare_job))
+            match PoolMessages::JobDeclaration(JobDeclaration::DeclareMiningJob(declare_job))
                 .try_into()
-                .unwrap();
-        sender.send(frame.into()).await.unwrap();
+            {
+                Ok(frame) => frame,
+                Err(_) => return,
+            };
+        if sender.send(frame.into()).await.is_err() {
+            error!("Failed to send StdFrame");
+        }
     }
 
     pub async fn on_upstream_message(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<StandardEitherFrame<PoolMessages<'static>>>,
     ) {
-        let up = self_mutex.safe_lock(|s| s.up.clone()).unwrap();
-        let task_manager = self_mutex.safe_lock(|s| s.task_manager.clone()).unwrap();
+        let up = match self_mutex.safe_lock(|s| s.up.clone()) {
+            Ok(up) => up,
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return;
+            }
+        };
+        let task_manager = match self_mutex.safe_lock(|s| s.task_manager.clone()) {
+            Ok(task_manager) => task_manager,
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return;
+            }
+        };
         let main_task = tokio::task::spawn(async move {
             loop {
-                let mut incoming: StdFrame = receiver
-                    .recv()
-                    .await
-                    .unwrap()
-                    .try_into()
-                    .unwrap_or_else(|_| std::process::abort());
-                let message_type = incoming.get_header().unwrap().msg_type();
+                let mut incoming: StdFrame = match receiver.recv().await {
+                    Some(msg) => msg.try_into().unwrap_or_else(|_| std::process::abort()),
+                    None => break,
+                };
+                let message_type = match incoming.get_header() {
+                    Some(header) => header.msg_type(),
+                    None => break,
+                };
                 let payload = incoming.payload();
                 let next_message_to_send =
                     ParseServerJobDeclarationMessages::handle_message_job_declaration(
@@ -274,7 +322,10 @@ impl JobDeclarator {
                     Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobSuccess(m)))) => {
                         let new_token = m.new_mining_job_token;
                         let last_declare =
-                            Self::get_last_declare_job_sent(&self_mutex, m.request_id);
+                            match Self::get_last_declare_job_sent(&self_mutex, m.request_id) {
+                                Ok(last_declare) => last_declare,
+                                Err(_) => break,
+                            };
                         let mut last_declare_mining_job_sent = last_declare.declare_job;
                         let is_future = last_declare.template.future_template;
                         let id = last_declare.template.template_id;
@@ -286,7 +337,7 @@ impl JobDeclarator {
                         // and can decide if send the set_custom_job or not
                         if is_future {
                             last_declare_mining_job_sent.mining_job_token = new_token;
-                            self_mutex
+                            if self_mutex
                                 .safe_lock(|s| {
                                     s.future_jobs.insert(
                                         id,
@@ -298,16 +349,25 @@ impl JobDeclarator {
                                         ),
                                     );
                                 })
-                                .unwrap();
+                                .is_err()
+                            {
+                                error!("Failed to acquire lock");
+                                return;
+                            };
                         } else {
-                            let set_new_prev_hash = self_mutex
-                                .safe_lock(|s| s.last_set_new_prev_hash.clone())
-                                .unwrap();
+                            let set_new_prev_hash =
+                                match self_mutex.safe_lock(|s| s.last_set_new_prev_hash.clone()) {
+                                    Ok(set_new_prev_hash) => set_new_prev_hash,
+                                    Err(_) => {
+                                        error!("Failed to acquire lock");
+                                        return;
+                                    }
+                                };
                             let mut template_outs = template.coinbase_tx_outputs.to_vec();
                             let mut pool_outs = last_declare.coinbase_pool_output;
                             pool_outs.append(&mut template_outs);
                             match set_new_prev_hash {
-                                Some(p) => Upstream::set_custom_jobs(
+                                Some(p) => match Upstream::set_custom_jobs(
                                     &up,
                                     last_declare_mining_job_sent,
                                     p,
@@ -320,7 +380,13 @@ impl JobDeclarator {
                                     pool_outs,
                                     template.coinbase_tx_locktime,
                                     template.template_id
-                                    ).await.unwrap(),
+                                    ).await {
+                                        Ok(_) => {},
+                                        Err(e) => {
+                                            error!("{}", e);
+                                            break;
+                                        }
+                                    },
                                 None => panic!("Invalid state we received a NewTemplate not future, without having received a set new prev hash")
                             }
                         }
@@ -330,26 +396,46 @@ impl JobDeclarator {
                     }
                     Ok(SendTo::None(None)) => (),
                     Ok(SendTo::Respond(m)) => {
-                        let sv2_frame: StdFrame =
-                            PoolMessages::JobDeclaration(m).try_into().unwrap();
-                        let sender = self_mutex.safe_lock(|self_| self_.sender.clone()).unwrap();
-                        sender.send(sv2_frame.into()).await.unwrap();
+                        let sv2_frame: StdFrame = match PoolMessages::JobDeclaration(m).try_into() {
+                            Ok(sv2_frame) => sv2_frame,
+                            Err(e) => {
+                                error!("{}", e);
+                                break;
+                            }
+                        };
+                        let sender = match self_mutex.safe_lock(|self_| self_.sender.clone()) {
+                            Ok(sender) => sender,
+                            Err(_) => return,
+                        };
+                        if sender.send(sv2_frame.into()).await.is_err() {
+                            error!("Failed to send sv2_frame");
+                            break;
+                        };
                     }
                     Ok(_) => unreachable!(),
                     Err(_) => todo!(),
                 }
             }
         });
-        TaskManager::add_allocate_tokens(task_manager, main_task.into())
+        if TaskManager::add_allocate_tokens(task_manager, main_task.into())
             .await
-            .unwrap();
+            .is_err()
+        {
+            error!("Failed to add allocate tokens task to task manager");
+        }
     }
 
     pub async fn on_set_new_prev_hash(
         self_mutex: Arc<Mutex<Self>>,
         set_new_prev_hash: SetNewPrevHash<'static>,
     ) {
-        let task_manager = self_mutex.safe_lock(|s| s.task_manager.clone()).unwrap();
+        let task_manager = match self_mutex.safe_lock(|s| s.task_manager.clone()) {
+            Ok(task_manager) => task_manager,
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return;
+            }
+        };
         let task = tokio::task::spawn(async move {
             let id = set_new_prev_hash.template_id;
             let _ = self_mutex.safe_lock(|s| {
@@ -357,37 +443,37 @@ impl JobDeclarator {
                 s.set_new_prev_hash_counter += 1;
             });
             let (job, up, merkle_path, template, mut pool_outs) = loop {
-                match self_mutex
-                    .safe_lock(|s| {
-                        if s.set_new_prev_hash_counter > 1
-                            && s.last_set_new_prev_hash != Some(set_new_prev_hash.clone())
-                        //it means that a new prev_hash is arrived while the previous hasn't exited the loop yet
-                        {
-                            s.set_new_prev_hash_counter -= 1;
-                            Some(None)
-                        } else {
-                            s.future_jobs.remove(&id).map(
-                                |(job, merkle_path, template, pool_outs)| {
-                                    s.future_jobs =
-                                        HashMap::with_hasher(BuildNoHashHasher::default());
-                                    s.set_new_prev_hash_counter -= 1;
-                                    Some((job, s.up.clone(), merkle_path, template, pool_outs))
-                                },
-                            )
-                        }
-                    })
-                    .unwrap()
-                {
-                    Some(Some(future_job_tuple)) => break future_job_tuple,
-                    Some(None) => return,
-                    None => {}
+                match self_mutex.safe_lock(|s| {
+                    if s.set_new_prev_hash_counter > 1
+                        && s.last_set_new_prev_hash != Some(set_new_prev_hash.clone())
+                    //it means that a new prev_hash is arrived while the previous hasn't exited the loop yet
+                    {
+                        s.set_new_prev_hash_counter -= 1;
+                        Some(None)
+                    } else {
+                        s.future_jobs
+                            .remove(&id)
+                            .map(|(job, merkle_path, template, pool_outs)| {
+                                s.future_jobs = HashMap::with_hasher(BuildNoHashHasher::default());
+                                s.set_new_prev_hash_counter -= 1;
+                                Some((job, s.up.clone(), merkle_path, template, pool_outs))
+                            })
+                    }
+                }) {
+                    Ok(Some(Some(future_job_tuple))) => break future_job_tuple,
+                    Ok(Some(None)) => return,
+                    Ok(None) => {}
+                    Err(_) => {
+                        error!("Failed to acquire lock");
+                        return;
+                    }
                 };
                 tokio::task::yield_now().await;
             };
             let signed_token = job.mining_job_token.clone();
             let mut template_outs = template.coinbase_tx_outputs.to_vec();
             pool_outs.append(&mut template_outs);
-            Upstream::set_custom_jobs(
+            match Upstream::set_custom_jobs(
                 &up,
                 job,
                 set_new_prev_hash,
@@ -402,24 +488,47 @@ impl JobDeclarator {
                 template.template_id,
             )
             .await
-            .unwrap();
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("{}", e);
+                }
+            }
         });
-        TaskManager::add_allocate_tokens(task_manager, task.into())
+        if TaskManager::add_allocate_tokens(task_manager, task.into())
             .await
-            .unwrap();
+            .is_err()
+        {
+            error!("Failed to add allocate tokens task to task manager");
+        }
     }
 
     async fn allocate_tokens(self_mutex: &Arc<Mutex<Self>>, token_to_allocate: u32) {
         for i in 0..token_to_allocate {
             let message = JobDeclaration::AllocateMiningJobToken(AllocateMiningJobToken {
-                user_identifier: "todo".to_string().try_into().unwrap(),
+                user_identifier: "todo".to_string().try_into().expect("Infallible operation"),
                 request_id: i,
             });
-            let sender = self_mutex.safe_lock(|s| s.sender.clone()).unwrap();
+            let sender = match self_mutex.safe_lock(|s| s.sender.clone()) {
+                Ok(sender) => sender,
+                Err(_) => {
+                    error!("Failed to acquire lock");
+                    return;
+                }
+            };
             // Safe unwrap message is build above and is valid, below can never panic
-            let frame: StdFrame = PoolMessages::JobDeclaration(message).try_into().unwrap();
+            let frame: StdFrame = match PoolMessages::JobDeclaration(message).try_into() {
+                Ok(frame) => frame,
+                Err(e) => {
+                    error!("{e}");
+                    return;
+                }
+            };
             // TODO join re
-            sender.send(frame.into()).await.unwrap();
+            if sender.send(frame.into()).await.is_err() {
+                error!("Failed to send StdFrame");
+                return;
+            };
         }
     }
     pub async fn on_solution(

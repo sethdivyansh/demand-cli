@@ -51,12 +51,15 @@ impl TemplateRx {
         miner_coinbase_outputs: Vec<TxOut>,
         authority_public_key: Option<Secp256k1PublicKey>,
         test_only_do_not_send_solution_to_tp: bool,
-    ) -> AbortOnDrop {
+    ) -> Result<AbortOnDrop, ()> {
         let mut encoded_outputs = vec![];
         miner_coinbase_outputs
             .consensus_encode(&mut encoded_outputs)
             .expect("Invalid coinbase output in config");
-        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let stream = match tokio::net::TcpStream::connect(address).await {
+            Ok(stream) => stream,
+            Err(_) => return Err(()),
+        };
 
         let initiator = match authority_public_key {
             Some(pub_key) => Initiator::from_raw_k(pub_key.into_bytes()),
@@ -93,25 +96,39 @@ impl TemplateRx {
         }));
 
         let task_manager = TaskManager::initialize();
-        let abortable = task_manager
-            .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+            Ok(Some(abortable)) => Ok(abortable),
+            // Aborter is None
+            Ok(None) => {
+                error!("Failed to get Aborter: Not found.");
+                return Err(());
+            }
+            // Failed to acquire lock
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return Err(());
+            }
+        };
         let on_new_solution_task =
             tokio::task::spawn(Self::on_new_solution(self_mutex.clone(), solution_receiver));
-        TaskManager::add_on_new_solution(task_manager.clone(), on_new_solution_task.into())
-            .await
-            .unwrap();
-        let main_task = Self::start_templates(self_mutex, receiver).await;
-        TaskManager::add_main_task(task_manager, main_task)
-            .await
-            .unwrap();
+        TaskManager::add_on_new_solution(task_manager.clone(), on_new_solution_task.into()).await?;
+        let main_task = match Self::start_templates(self_mutex, receiver).await {
+            Ok(main_task) => main_task,
+            Err(_) => return Err(()),
+        };
+        TaskManager::add_main_task(task_manager, main_task).await?;
         abortable
     }
 
     pub async fn send(self_: &Arc<Mutex<Self>>, sv2_frame: StdFrame) {
         let either_frame = sv2_frame.into();
-        let sender_to_tp = self_.safe_lock(|self_| self_.sender.clone()).unwrap();
+        let sender_to_tp = match self_.safe_lock(|self_| self_.sender.clone()) {
+            Ok(sender_to_tp) => sender_to_tp,
+            Err(_) => {
+                error!("Poisoned Lock error");
+                return;
+            }
+        };
         match sender_to_tp.send(either_frame).await {
             Ok(_) => (),
             Err(e) => panic!("{:?}", e),
@@ -124,7 +141,13 @@ impl TemplateRx {
                 coinbase_output_max_additional_size: size,
             }),
         );
-        let frame: StdFrame = coinbase_output_data_size.try_into().unwrap();
+        let frame: StdFrame = match coinbase_output_data_size.try_into() {
+            Ok(frame) => frame,
+            Err(_) => {
+                error!("Failed to convert coinbase_output_data_size to StdFrame");
+                return;
+            }
+        };
         Self::send(self_mutex, frame).await;
     }
 
@@ -137,56 +160,85 @@ impl TemplateRx {
                 template_id: new_template.template_id,
             }),
         );
-        let frame: StdFrame = tx_data_request.try_into().unwrap();
+        let frame: StdFrame = match tx_data_request.try_into() {
+            Ok(frame) => frame,
+            Err(_) => {
+                error!("Failed to convert coinbase_output_data_size to StdFrame");
+                return;
+            }
+        };
+
         Self::send(self_mutex, frame).await;
     }
 
     async fn get_last_token(
         jd: Option<Arc<Mutex<JobDeclarator>>>,
         miner_coinbase_output: &[u8],
-    ) -> AllocateMiningJobTokenSuccess<'static> {
+    ) -> Option<AllocateMiningJobTokenSuccess<'static>> {
         if let Some(jd) = jd {
-            super::job_declarator::JobDeclarator::get_last_token(&jd).await
-        } else {
-            AllocateMiningJobTokenSuccess {
-                request_id: 0,
-                mining_job_token: vec![0; 32].try_into().unwrap(),
-                coinbase_output_max_additional_size: 100,
-                coinbase_output: miner_coinbase_output.to_vec().try_into().unwrap(),
-                async_mining_allowed: true,
+            match super::job_declarator::JobDeclarator::get_last_token(&jd).await {
+                Ok(last_token) => Some(last_token),
+                Err(_) => None,
             }
+        } else {
+            Some(AllocateMiningJobTokenSuccess {
+                request_id: 0,
+                mining_job_token: vec![0; 32].try_into().expect("Internal error: this operation can not fail because the vec![0; 32] can always be converted into Inner"),
+                coinbase_output_max_additional_size: 100,
+                coinbase_output: miner_coinbase_output.to_vec().try_into().expect("Internal error: this operation can not fail because the Vec can always be converted into Inner"),
+                async_mining_allowed: true,
+            })
         }
     }
 
     pub async fn start_templates(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<EitherFrame>,
-    ) -> AbortOnDrop {
-        let jd = self_mutex.safe_lock(|s| s.jd.clone()).unwrap();
-        let down = self_mutex.safe_lock(|s| s.down.clone()).unwrap();
+    ) -> Result<AbortOnDrop, roles_logic_sv2::Error> {
+        let jd = match self_mutex.safe_lock(|s| s.jd.clone()) {
+            Ok(jd) => jd,
+            Err(_) => {
+                error!("Failed to acquire lock: Poisoned");
+                return Err(roles_logic_sv2::Error::PoisonLock(
+                    "Failed to acquire lock: Poisoned".to_string(),
+                ));
+            }
+        };
+        let down = self_mutex
+            .safe_lock(|s| s.down.clone())
+            .map_err(|e| roles_logic_sv2::Error::PoisonLock(e.to_string()))?;
         let mut coinbase_output_max_additional_size_sent = false;
         let mut last_token = None;
         let miner_coinbase_output = self_mutex
             .safe_lock(|s| s.miner_coinbase_output.clone())
-            .unwrap();
+            .map_err(|e| roles_logic_sv2::Error::PoisonLock(e.to_string()))?;
         let main_task = {
             let self_mutex = self_mutex.clone();
             tokio::task::spawn(async move {
                 // Send CoinbaseOutputDataSize size to TP
                 loop {
                     if last_token.is_none() {
-                        let jd = self_mutex.safe_lock(|s| s.jd.clone()).unwrap();
+                        let jd = match self_mutex.safe_lock(|s| s.jd.clone()) {
+                            Ok(jd) => jd,
+                            Err(_) => {
+                                error!("Failed to acquire lock: Poisoned");
+                                return;
+                            }
+                        };
                         last_token =
                             Some(Self::get_last_token(jd, &miner_coinbase_output[..]).await);
                     }
+                    let coinbase_output_max_additional_size = match last_token.clone() {
+                        Some(Some(last_token)) => last_token.coinbase_output_max_additional_size,
+                        Some(None) => return,
+                        None => return,
+                    };
+
                     if !coinbase_output_max_additional_size_sent {
                         coinbase_output_max_additional_size_sent = true;
                         Self::send_max_coinbase_size(
                             &self_mutex,
-                            last_token
-                                .clone()
-                                .unwrap()
-                                .coinbase_output_max_additional_size,
+                            coinbase_output_max_additional_size,
                         )
                         .await;
                     }
@@ -196,7 +248,13 @@ impl TemplateRx {
                     //    handle_result!(tx_status.clone(), received.try_into());
                     let frame: Result<StdFrame, _> = received.try_into();
                     if let Ok(mut frame) = frame {
-                        let message_type = frame.get_header().unwrap().msg_type();
+                        let message_type = match frame.get_header() {
+                            Some(header) => header.msg_type(),
+                            None => {
+                                error!("Msg header not found");
+                                return;
+                            }
+                        };
                         let payload = frame.payload();
 
                         let next_message_to_send =
@@ -216,18 +274,29 @@ impl TemplateRx {
                                         super::IS_NEW_TEMPLATE_HANDLED
                                             .store(false, std::sync::atomic::Ordering::Release);
                                         Self::send_tx_data_request(&self_mutex, m.clone()).await;
-                                        self_mutex
+                                        if self_mutex
                                             .safe_lock(|t| t.new_template_message = Some(m.clone()))
-                                            .unwrap();
-                                        let token = last_token.clone().unwrap();
+                                            .is_err()
+                                        {
+                                            error!("Failed to acquire lock: Poisoned");
+                                            return;
+                                        };
+                                        let token = match last_token.clone() {
+                                            Some(Some(token)) => token,
+                                            Some(None) => return,
+                                            None => return,
+                                        };
                                         let pool_output = token.coinbase_output.to_vec();
-                                        Downstream::on_new_template(
+                                        if Downstream::on_new_template(
                                             &down,
                                             m.clone(),
                                             &pool_output[..],
                                         )
                                         .await
-                                        .unwrap();
+                                        .is_err()
+                                        {
+                                            break;
+                                        };
                                     }
                                     Some(TemplateDistribution::SetNewPrevHash(m)) => {
                                         info!("Received SetNewPrevHash, waiting for IS_NEW_TEMPLATE_HANDLED");
@@ -245,7 +314,10 @@ impl TemplateRx {
                                                 m.clone(),
                                             ).await;
                                         }
-                                        Downstream::on_set_new_prev_hash(&down, m).await.unwrap();
+                                        if Downstream::on_set_new_prev_hash(&down, m).await.is_err()
+                                        {
+                                            break;
+                                        };
                                     }
 
                                     Some(TemplateDistribution::RequestTransactionDataSuccess(
@@ -255,11 +327,30 @@ impl TemplateRx {
                                         // template message
                                         let transactions_data = m.transaction_list;
                                         let excess_data = m.excess_data;
-                                        let m = self_mutex
+                                        let m = match self_mutex
                                             .safe_lock(|t| t.new_template_message.clone())
-                                            .unwrap()
-                                            .unwrap();
-                                        let token = last_token.unwrap();
+                                        {
+                                            Ok(Some(new_template)) => new_template,
+                                            Ok(None) => {
+                                                error!("New template message not found");
+                                                return;
+                                            }
+                                            Err(_) => {
+                                                error!("Failed to acquire lock: Poisoned");
+                                                return;
+                                            }
+                                        };
+                                        let token = match last_token {
+                                            Some(Some(last_token)) => last_token,
+                                            Some(None) => {
+                                                error!("Failed to retrieve last token");
+                                                return;
+                                            }
+                                            None => {
+                                                error!("Failed to retrieve last token");
+                                                return;
+                                            }
+                                        };
                                         last_token = None;
                                         let mining_token = token.mining_job_token.to_vec();
                                         let pool_coinbase_out = token.coinbase_output.to_vec();
@@ -313,15 +404,19 @@ impl TemplateRx {
                 }
             })
         };
-        main_task.into()
+        Ok(main_task.into())
     }
 
     async fn on_new_solution(self_: Arc<Mutex<Self>>, mut rx: TReceiver<SubmitSolution<'static>>) {
         while let Some(solution) = rx.recv().await {
-            if !self_
-                .safe_lock(|s| s.test_only_do_not_send_solution_to_tp)
-                .unwrap()
-            {
+            let test_only = match self_.safe_lock(|s| s.test_only_do_not_send_solution_to_tp) {
+                Ok(test_only) => test_only,
+                Err(_) => {
+                    error!("Failed to acquire lock: Poisoned");
+                    return;
+                }
+            };
+            if !test_only {
                 let sv2_frame: StdFrame = PoolMessages::TemplateDistribution(
                     TemplateDistribution::SubmitSolution(solution),
                 )

@@ -115,13 +115,17 @@ async fn initialize_proxy(
         let share_accounter_abortable;
         if let Some(_tp_addr) = TP_ADDRESS.as_ref() {
             jdc_abortable = Some(
-                jd_client::start(
+                match jd_client::start(
                     jdc_from_translator_receiver,
                     jdc_to_translator_sender,
                     from_share_accounter_to_jdc_recv,
                     from_jdc_to_share_accounter_send,
                 )
-                .await,
+                .await
+                {
+                    Ok(jdc_abortable) => jdc_abortable,
+                    Err(_) => return,
+                },
             );
             share_accounter_abortable = match share_accounter::start(
                 from_jdc_to_share_accounter_recv,

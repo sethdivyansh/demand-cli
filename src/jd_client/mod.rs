@@ -54,7 +54,7 @@ pub async fn start(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-) -> AbortOnDrop {
+) -> Result<AbortOnDrop, ()> {
     initialize_jd(receiver, sender, up_receiver, up_sender).await
 }
 async fn initialize_jd(
@@ -62,12 +62,17 @@ async fn initialize_jd(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-) -> AbortOnDrop {
+) -> Result<AbortOnDrop, ()> {
     let task_manager = TaskManager::initialize();
-    let abortable = task_manager
+    let abortable = match task_manager
         .safe_lock(|t| t.get_aborter())
-        .unwrap()
-        .unwrap();
+        .map_err(|_| ())?
+    {
+        Some(abortable) => abortable,
+        None => {
+            return Err(());
+        }
+    };
     let test_only_do_not_send_solution_to_tp = false;
 
     // When Downstream receive a share that meets bitcoin target it transformit in a
@@ -89,31 +94,28 @@ async fn initialize_jd(
         .as_ref()
         .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present");
     let mut parts = tp_address.split(':');
-    let ip_tp = parts.next().unwrap().to_string();
-    let port_tp = parts.next().unwrap().parse::<u16>().unwrap();
+    let ip_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").to_string();
+    let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
 
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let (jd, jd_abortable) = match JobDeclarator::new(
-        crate::POOL_ADDRESS
-            .to_socket_addrs()
-            .unwrap()
-            .next()
-            .unwrap(),
-        auth_pub_k.into_bytes(),
-        upstream.clone(),
-    )
-    .await
+    let address = match crate::POOL_ADDRESS
+        .to_socket_addrs()
+        .map_err(|_| ())?
+        .next()
     {
-        Ok(c) => c,
-        Err(_e) => {
-            // TODO TODO TODO
-            todo!()
-        }
+        Some(addr) => addr,
+        None => return Err(()),
     };
+    let (jd, jd_abortable) =
+        match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone()).await {
+            Ok(c) => c,
+            Err(_e) => {
+                // TODO TODO TODO
+                todo!()
+            }
+        };
 
-    TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
-        .await
-        .unwrap();
+    TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable).await?;
 
     let donwstream = Arc::new(Mutex::new(DownstreamMiningNode::new(
         sender,
@@ -123,10 +125,8 @@ async fn initialize_jd(
         vec![],
         Some(jd.clone()),
     )));
-    let downstream_abortable = DownstreamMiningNode::start(donwstream.clone(), receiver).await;
-    TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable)
-        .await
-        .unwrap();
+    let downstream_abortable = DownstreamMiningNode::start(donwstream.clone(), receiver).await?;
+    TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable).await?;
     upstream
         .safe_lock(|u| u.downstream = Some(donwstream.clone()))
         .expect("Poison lock");
@@ -140,12 +140,13 @@ async fn initialize_jd(
                 panic!()
             }
         };
-    TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable)
-        .await
-        .unwrap();
-
+    TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable).await?;
+    let ip = match IpAddr::from_str(ip_tp.as_str()) {
+        Ok(tp) => tp,
+        Err(_) => return Err(()),
+    };
     let tp_abortable = TemplateRx::connect(
-        SocketAddr::new(IpAddr::from_str(ip_tp.as_str()).unwrap(), port_tp),
+        SocketAddr::new(ip, port_tp),
         recv_solution,
         Some(jd.clone()),
         donwstream,
@@ -153,9 +154,7 @@ async fn initialize_jd(
         None,
         test_only_do_not_send_solution_to_tp,
     )
-    .await;
-    TaskManager::add_template_receiver_task(task_manager, tp_abortable)
-        .await
-        .unwrap();
-    abortable
+    .await?;
+    TaskManager::add_template_receiver_task(task_manager, tp_abortable).await?;
+    Ok(abortable)
 }

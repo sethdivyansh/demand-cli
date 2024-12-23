@@ -73,12 +73,13 @@ impl DownstreamMiningNodeStatus {
         }
     }
 
-    pub fn get_channel(&mut self) -> &mut PoolChannelFactory {
+    // TODO: Fix cargo clippy warning here
+    pub fn get_channel(&mut self) -> Result<&mut PoolChannelFactory, ()> {
         match self {
-            DownstreamMiningNodeStatus::Paired(_) => panic!(),
-            DownstreamMiningNodeStatus::ChannelOpened((channel, _)) => channel,
+            DownstreamMiningNodeStatus::Paired(_) => Err(()),
+            DownstreamMiningNodeStatus::ChannelOpened((channel, _)) => Ok(channel),
             DownstreamMiningNodeStatus::SoloMinerPaired() => panic!(),
-            DownstreamMiningNodeStatus::SoloMinerChannelOpend(channel) => channel,
+            DownstreamMiningNodeStatus::SoloMinerChannelOpend(channel) => Ok(channel),
         }
     }
     fn have_channel(&self) -> bool {
@@ -142,45 +143,65 @@ impl DownstreamMiningNode {
     pub async fn start(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<Mining<'static>>,
-    ) -> AbortOnDrop {
+    ) -> Result<AbortOnDrop, ()> {
         let task_manager = TaskManager::initialize();
-        let abortable = task_manager
-            .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+            Ok(Some(abortable)) => Ok(abortable),
+            // Aborter is None
+            Ok(None) => {
+                error!("Failed to get Aborter: Not found.");
+                return Err(());
+            }
+            // Failed to acquire lock
+            Err(_) => {
+                error!("Failed to acquire lock");
+                return Err(());
+            }
+        };
         let factory_abortable = DownstreamMiningNode::set_channel_factory(self_mutex.clone());
-        TaskManager::add_set_channel_factory(task_manager.clone(), factory_abortable)
-            .await
-            .unwrap();
+        TaskManager::add_set_channel_factory(task_manager.clone(), factory_abortable?).await?;
         let main_task = task::spawn(async move {
             while let Some(message) = receiver.recv().await {
                 DownstreamMiningNode::next(&self_mutex, message).await;
             }
         });
-        TaskManager::add_main_task(task_manager, main_task.into())
-            .await
-            .unwrap();
+        TaskManager::add_main_task(task_manager, main_task.into()).await?;
         abortable
     }
 
     // When we do pooled minig we create a channel factory when the pool send a open extended
     // mining channel success
-    fn set_channel_factory(self_mutex: Arc<Mutex<Self>>) -> AbortOnDrop {
-        tokio::task::spawn(async move {
-            if !self_mutex.safe_lock(|s| s.status.is_solo_miner()).unwrap() {
+    fn set_channel_factory(self_mutex: Arc<Mutex<Self>>) -> Result<AbortOnDrop, ()> {
+        let is_solo_miner = self_mutex
+            .safe_lock(|s| s.status.is_solo_miner())
+            .map_err(|_| ())?;
+        let handle = tokio::task::spawn(async move {
+            if !is_solo_miner {
                 // Safe unwrap already checked if it contains an upstream withe `is_solo_miner`
-                let upstream = self_mutex
-                    .safe_lock(|s| s.status.get_upstream().unwrap())
-                    .unwrap();
-                let factory = UpstreamMiningNode::take_channel_factory(upstream).await;
-                self_mutex
-                    .safe_lock(|s| {
-                        s.status.set_channel(factory);
-                    })
-                    .unwrap();
+                let upstream = match self_mutex.safe_lock(|s| s.status.get_upstream()) {
+                    Ok(Some(upstream)) => upstream,
+                    Ok(None) => {
+                        error!("Upstream is None");
+                        return;
+                    }
+                    Err(_) => {
+                        error!("Failed to acquire lock");
+                        return;
+                    }
+                };
+                if let Ok(factory) = UpstreamMiningNode::take_channel_factory(upstream).await {
+                    if self_mutex
+                        .safe_lock(|s| {
+                            s.status.set_channel(factory);
+                        })
+                        .is_err()
+                    {
+                        error!("Failed to acquire lock");
+                    }
+                }
             }
-        })
-        .into()
+        });
+        Ok(handle.into())
     }
 
     /// Parse the received message and relay it to the right upstream
@@ -205,19 +226,37 @@ impl DownstreamMiningNode {
         match next_message_to_send {
             Ok(SendTo::RelaySameMessageToRemote(upstream_mutex)) => {
                 let incoming = incoming.expect("JDC dowstream try to releay an inexistent message");
-                UpstreamMiningNode::send(&upstream_mutex, incoming)
+                if UpstreamMiningNode::send(&upstream_mutex, incoming)
                     .await
-                    .unwrap();
+                    .is_err()
+                {
+                    error!("Failed to send msg upstream");
+                    return;
+                };
             }
             Ok(SendTo::RelayNewMessage(Mining::SubmitSharesExtended(mut share))) => {
                 // If we have a realy new message it means that we are in a pooled mining mods.
-                let upstream_mutex = self_mutex
-                    .safe_lock(|s| s.status.get_upstream().unwrap())
-                    .unwrap();
+                let upstream_mutex = match self_mutex.safe_lock(|s| s.status.get_upstream()) {
+                    Ok(Some(upstream_mutex)) => upstream_mutex,
+                    Ok(None) => {
+                        error!("Upstream is None");
+                        return;
+                    }
+                    Err(_) => {
+                        error!("Failed to acquire lock");
+                        return;
+                    }
+                };
                 // When re receive SetupConnectionSuccess we link the last_template_id with the
                 // pool's job_id. The below return as soon as we have a pairable job id for the
                 // template_id associated with this share.
-                let last_template_id = self_mutex.safe_lock(|s| s.last_template_id).unwrap();
+                let last_template_id = match self_mutex.safe_lock(|s| s.last_template_id) {
+                    Ok(last_template_id) => last_template_id,
+                    Err(_) => {
+                        error!("Failed to acquire lock");
+                        return;
+                    }
+                };
                 let job_id_future =
                     UpstreamMiningNode::get_job_id(&upstream_mutex, last_template_id);
                 let job_id = match timeout(Duration::from_secs(10), job_id_future).await {
@@ -232,15 +271,33 @@ impl DownstreamMiningNode {
                     job_id
                 );
                 let message = Mining::SubmitSharesExtended(share);
-                UpstreamMiningNode::send(&upstream_mutex, message)
+                if UpstreamMiningNode::send(&upstream_mutex, message)
                     .await
-                    .unwrap();
+                    .is_err()
+                {
+                    error!("Failed to send SubmitSharesExtended msg upstream");
+                    return;
+                };
             }
             Ok(SendTo::RelayNewMessage(message)) => {
-                let upstream_mutex = self_mutex.safe_lock(|s| s.status.get_upstream().expect("We should return RelayNewMessage only if we are not in solo mining mode")).unwrap();
-                UpstreamMiningNode::send(&upstream_mutex, message)
+                let upstream_mutex = match self_mutex.safe_lock(|s| {
+                    s.status.get_upstream().expect(
+                        "We should return RelayNewMessage only if we are not in solo mining mode",
+                    )
+                }) {
+                    Ok(upstream_mutex) => upstream_mutex,
+                    Err(_) => {
+                        error!("Failed to acquire mutex");
+                        return;
+                    }
+                };
+                if UpstreamMiningNode::send(&upstream_mutex, message)
                     .await
-                    .unwrap();
+                    .is_err()
+                {
+                    error!("Failed to send msg upstream");
+                    return;
+                };
             }
             Ok(SendTo::Multiple(messages)) => {
                 for message in messages {
@@ -248,7 +305,10 @@ impl DownstreamMiningNode {
                 }
             }
             Ok(SendTo::Respond(message)) => {
-                Self::send(&self_mutex, message).await.unwrap();
+                if Self::send(&self_mutex, message).await.is_err() {
+                    error!("Failed to send msg");
+                    return;
+                };
             }
             Ok(SendTo::None(None)) => (),
             Ok(m) => unreachable!("Unexpected message type: {:?}", m),
@@ -259,11 +319,14 @@ impl DownstreamMiningNode {
 
     /// Send a message downstream
     pub async fn send(self_mutex: &Arc<Mutex<Self>>, message: Mining<'static>) -> Result<(), ()> {
-        let sender = self_mutex.safe_lock(|self_| self_.sender.clone()).unwrap();
+        let sender = self_mutex
+            .safe_lock(|self_| self_.sender.clone())
+            .map_err(|_| ())?;
         match sender.send(message).await {
             Ok(_) => Ok(()),
-            Err(_) => {
-                todo!()
+            Err(e) => {
+                error!("{e}");
+                Err(())
             }
         }
     }
@@ -273,7 +336,10 @@ impl DownstreamMiningNode {
         mut new_template: NewTemplate<'static>,
         pool_output: &[u8],
     ) -> Result<(), Error> {
-        if !self_mutex.safe_lock(|s| s.status.have_channel()).unwrap() {
+        if !self_mutex
+            .safe_lock(|s| s.status.have_channel())
+            .map_err(|e| Error::PoisonLock(e.to_string()))?
+        {
             super::IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
             return Ok(());
         }
@@ -282,7 +348,10 @@ impl DownstreamMiningNode {
             TxOut::consensus_decode(&mut pool_out).expect("Upstream sent an invalid coinbase");
         let to_send = self_mutex
             .safe_lock(|s| {
-                let channel = s.status.get_channel();
+                let channel = s
+                    .status
+                    .get_channel()
+                    .map_err(|_| Error::NotFoundChannelId)?;
                 channel.update_pool_outputs(vec![pool_output]);
                 // TODO TODO TODO if this fail just reinitialize the proxy
                 channel.on_new_template(&mut new_template)
@@ -294,17 +363,22 @@ impl DownstreamMiningNode {
         let to_send = to_send.into_values();
         for message in to_send {
             let message = if let Mining::NewExtendedMiningJob(job) = message {
-                let jd = self_mutex.safe_lock(|s| s.jd.clone()).unwrap().unwrap();
+                let jd = self_mutex
+                    .safe_lock(|s| s.jd.clone())
+                    .map_err(|e| Error::PoisonLock(e.to_string()))?
+                    .ok_or(Error::JDSMissingTransactions)?; // Correct Error to return when JD is None?
                 jd.safe_lock(|jd| jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone())
-                    .unwrap();
+                    .map_err(|e| Error::PoisonLock(e.to_string()))?;
                 jd.safe_lock(|jd| jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone())
-                    .unwrap();
+                    .map_err(|e| Error::PoisonLock(e.to_string()))?;
 
                 Mining::NewExtendedMiningJob(job)
             } else {
                 message
             };
-            Self::send(self_mutex, message).await.unwrap();
+            Self::send(self_mutex, message)
+                .await
+                .map_err(|_| Error::DownstreamDown)?;
         }
         // See coment on the definition of the global for memory
         // ordering
@@ -316,18 +390,32 @@ impl DownstreamMiningNode {
         self_mutex: &Arc<Mutex<Self>>,
         new_prev_hash: roles_logic_sv2::template_distribution_sv2::SetNewPrevHash<'static>,
     ) -> Result<(), Error> {
-        if !self_mutex.safe_lock(|s| s.status.have_channel()).unwrap() {
+        if !self_mutex
+            .safe_lock(|s| s.status.have_channel())
+            .map_err(|e| Error::PoisonLock(e.to_string()))?
+        {
             return Ok(());
         }
         let job_id = self_mutex
             .safe_lock(|s| {
-                let channel = s.status.get_channel();
+                let channel = s
+                    .status
+                    .get_channel()
+                    .map_err(|_| Error::NotFoundChannelId)?;
                 channel.on_new_prev_hash_from_tp(&new_prev_hash)
             })
-            .unwrap()?;
+            .map_err(|e| Error::PoisonLock(e.to_string()))??;
+
         let channel_ids = self_mutex
-            .safe_lock(|s| s.status.get_channel().get_extended_channels_ids())
-            .unwrap();
+            .safe_lock(|s| {
+                s.status
+                    .get_channel()
+                    .map_err(|_| Error::NotFoundChannelId)
+                    .map(|channel| channel.get_extended_channels_ids())
+            })
+            .map_err(|e| Error::PoisonLock(e.to_string()))?
+            .map_err(|_| Error::NotFoundChannelId)?;
+
         let channel_id = match channel_ids.len() {
             1 => channel_ids[0],
             _ => unreachable!(),
@@ -340,7 +428,9 @@ impl DownstreamMiningNode {
             nbits: new_prev_hash.n_bits,
         };
         let message = Mining::SetNewPrevHash(to_send);
-        Self::send(self_mutex, message).await.unwrap();
+        Self::send(self_mutex, message)
+            .await
+            .map_err(|_| Error::DownstreamDown)?;
         Ok(())
     }
 }
@@ -387,7 +477,10 @@ impl
         if !self.status.is_solo_miner() {
             // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
             Ok(SendTo::RelaySameMessageToRemote(
-                self.status.get_upstream().unwrap(),
+                match self.status.get_upstream() {
+                    Some(upstream) => upstream,
+                    None => return Err(Error::NoUpstreamsConnected),
+                },
             ))
         } else {
             // The channel factory is created here so that we are sure that if we have a channel
@@ -422,11 +515,11 @@ impl
             let request_id = m.request_id;
             let hash_rate = m.nominal_hash_rate;
             let min_extranonce_size = m.min_extranonce_size;
-            let messages_res = self.status.get_channel().new_extended_channel(
-                request_id,
-                hash_rate,
-                min_extranonce_size,
-            );
+            let messages_res = self
+                .status
+                .get_channel()
+                .map_err(|_| Error::NotFoundChannelId)?
+                .new_extended_channel(request_id, hash_rate, min_extranonce_size);
             match messages_res {
                 Ok(messages) => {
                     let messages = messages.into_iter().map(SendTo::Respond).collect();
@@ -444,7 +537,10 @@ impl
         if !self.status.is_solo_miner() {
             // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
             Ok(SendTo::RelaySameMessageToRemote(
-                self.status.get_upstream().unwrap(),
+                match self.status.get_upstream() {
+                    Some(upstream) => upstream,
+                    None => return Err(Error::NoUpstreamsConnected),
+                },
             ))
         } else {
             todo!()
@@ -465,6 +561,7 @@ impl
         match self
             .status
             .get_channel()
+            .map_err(|_| Error::NotFoundChannelId)?
             .on_submit_shares_extended(m.clone())?
         {
             OnNewShare::SendErrorDownstream(s) => {
@@ -504,16 +601,20 @@ impl
                             coinbase_tx: coinbase.try_into()?,
                         };
                         // The below channel should never be full is ok to block
-                        solution_sender.blocking_send(solution).unwrap();
+                        solution_sender
+                            .blocking_send(solution)
+                            .map_err(|_| Error::DownstreamDown)?; // Better Error to return here?
                         if !self.status.is_solo_miner() {
                             {
                                 let jd = self.jd.clone();
                                 let mut share = share.clone();
-                                share.extranonce = extranonce.try_into().unwrap();
+                                share.extranonce = extranonce.try_into()?;
                                 // This do not need to be put in a task manager it always return
                                 // fastly
                                 tokio::task::spawn(async move {
-                                    JobDeclarator::on_solution(&jd.unwrap(), share).await
+                                    if let Some(jd) = jd {
+                                        JobDeclarator::on_solution(&jd, share).await
+                                    }
                                 });
                             }
                         }

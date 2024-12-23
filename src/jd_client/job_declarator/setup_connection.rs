@@ -9,6 +9,7 @@ use roles_logic_sv2::{
 };
 use std::{convert::TryInto, net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
+use tracing::error;
 pub type Message = PoolMessages<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
@@ -21,16 +22,16 @@ impl SetupConnectionHandler {
             .to_string()
             .into_bytes()
             .try_into()
-            .unwrap();
-        let vendor = String::new().try_into().unwrap();
-        let hardware_version = String::new().try_into().unwrap();
-        let firmware = String::new().try_into().unwrap();
+            .expect("Internal error: this operation can not fail because IP addr string can always be converted into Inner");
+        let vendor = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
+        let hardware_version = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
+        let firmware = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
         let token = std::env::var("TOKEN").expect("Checked at initialization");
         let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
         let device_id = format!("{}::POOLED::{}", device_id, token)
             .to_string()
             .try_into()
-            .unwrap();
+            .expect("Internal error: this operation can not fail because device_id string can always be converted into Inner");
         let mut setup_connection = SetupConnection {
             protocol: Protocol::JobDeclarationProtocol,
             min_version: 2,
@@ -54,9 +55,7 @@ impl SetupConnectionHandler {
     ) -> Result<(), crate::jd_client::error::Error> {
         let setup_connection = Self::get_setup_connection_message(proxy_address);
 
-        let sv2_frame: StdFrame = PoolMessages::Common(setup_connection.into())
-            .try_into()
-            .unwrap();
+        let sv2_frame: StdFrame = PoolMessages::Common(setup_connection.into()).try_into()?;
         let sv2_frame = sv2_frame.into();
 
         sender
@@ -64,9 +63,18 @@ impl SetupConnectionHandler {
             .await
             .map_err(|_| crate::jd_client::error::Error::Unrecoverable)?;
 
-        let mut incoming: StdFrame = receiver.recv().await.unwrap().try_into().unwrap();
+        let mut incoming: StdFrame = match receiver.recv().await {
+            Some(msg) => msg.try_into()?,
+            None => {
+                error!("Failed to receive msg from pool");
+                return Err(crate::jd_client::error::Error::Unrecoverable); // Better Error to return?
+            }
+        };
 
-        let message_type = incoming.get_header().unwrap().msg_type();
+        let message_type = incoming
+            .get_header()
+            .ok_or(crate::jd_client::error::Error::Unrecoverable)?
+            .msg_type();
         let payload = incoming.payload();
         ParseUpstreamCommonMessages::handle_message_common(
             Arc::new(Mutex::new(SetupConnectionHandler {})),

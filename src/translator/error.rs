@@ -26,7 +26,7 @@ impl From<Infallible> for Error<'_> {
     }
 }
 
-impl<'a> fmt::Display for Error<'a> {
+impl fmt::Display for Error<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::InvalidExtranonce(e) => write!(f, "InvalidExtranonce {}", e),
