@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info};
 
-use crate::shared::utils::AbortOnDrop;
+use crate::{shared::utils::AbortOnDrop, update_proxy_state, PoolState};
 use task_manager::TaskManager;
 
 pub type Message = PoolExtMessages<'static>;
@@ -123,6 +123,7 @@ pub fn relay_up(
                 let either_frame: EitherFrame = std_frame.into();
                 if send.send(either_frame).await.is_err() {
                     error!("Mining upstream failed");
+                    update_proxy_state(PoolState::Down);
                     break;
                 };
             } else {
@@ -167,6 +168,7 @@ pub fn relay_down(
                 break;
             }
         }
+        update_proxy_state(PoolState::Down);
     });
     task.into()
 }

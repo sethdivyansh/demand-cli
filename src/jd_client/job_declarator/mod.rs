@@ -1,6 +1,6 @@
 pub mod message_handler;
 mod task_manager;
-use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
+use binary_sv2::{Seq0255, Seq064K, Sv2DataType, B016M, B064K, U256};
 use bitcoin::{util::psbt::serialize::Deserialize, Transaction};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use demand_sv2_connection::noise_connection_tokio::Connection;
@@ -10,7 +10,7 @@ use roles_logic_sv2::{
     mining_sv2::SubmitSharesExtended,
     parsers::{JobDeclaration, PoolMessages},
     template_distribution_sv2::SetNewPrevHash,
-    utils::{hash_lists_tuple, Mutex},
+    utils::Mutex,
 };
 use std::{collections::HashMap, convert::TryInto};
 use task_manager::TaskManager;
@@ -226,8 +226,7 @@ impl JobDeclarator {
                 return;
             }
         };
-        // TODO: create right nonce
-        let tx_short_hash_nonce = 0;
+
         let mut tx_list: Vec<Transaction> = Vec::new();
         for tx in tx_list_.to_vec() {
             match Transaction::deserialize(&tx) {
@@ -252,6 +251,21 @@ impl JobDeclarator {
                 error!("Failed to acquire lock");
                 return;
             };
+        let tx_list_seq064k = if let Some(inner) = Some(tx_list_.clone().into_inner()) {
+            let inner_vec = inner
+                .into_iter()
+                .filter_map(|item| {
+                    let item_vec = item.to_vec();
+                    U256::from_vec_(item_vec).ok()
+                })
+                .collect();
+            match Seq064K::new(inner_vec) {
+                Ok(seq) => seq,
+                Err(_) => return,
+            }
+        } else {
+            return;
+        };
 
         let declare_job = DeclareMiningJob {
             request_id: id,
@@ -259,9 +273,7 @@ impl JobDeclarator {
             version: template.version,
             coinbase_prefix,
             coinbase_suffix,
-            tx_short_hash_nonce,
-            tx_short_hash_list: hash_lists_tuple(tx_list.clone(), tx_short_hash_nonce).0,
-            tx_hash_list_hash: hash_lists_tuple(tx_list.clone(), tx_short_hash_nonce).1,
+            tx_list: tx_list_seq064k,
             excess_data, // request transaction data
         };
         let last_declare = LastDeclareJob {

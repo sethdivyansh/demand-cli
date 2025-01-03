@@ -74,11 +74,11 @@ impl DownstreamMiningNodeStatus {
     }
 
     // TODO: Fix cargo clippy warning here
-    pub fn get_channel(&mut self) -> Result<&mut PoolChannelFactory, ()> {
+    pub fn get_channel(&mut self) -> Result<&mut PoolChannelFactory, Error> {
         match self {
-            DownstreamMiningNodeStatus::Paired(_) => Err(()),
+            DownstreamMiningNodeStatus::Paired(_) => Err(Error::DownstreamDown), // More appropriate Error to return
             DownstreamMiningNodeStatus::ChannelOpened((channel, _)) => Ok(channel),
-            DownstreamMiningNodeStatus::SoloMinerPaired() => panic!(),
+            DownstreamMiningNodeStatus::SoloMinerPaired() => Err(Error::DownstreamDown),
             DownstreamMiningNodeStatus::SoloMinerChannelOpend(channel) => Ok(channel),
         }
     }

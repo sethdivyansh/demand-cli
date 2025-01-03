@@ -177,6 +177,7 @@ async fn initialize_proxy(
                 continue;
             }
             Ok(Reconnect::NoUpstream) => {
+                update_proxy_state(PoolState::Up);
                 pool_addr = None;
                 continue;
             }
