@@ -105,6 +105,9 @@ impl Downstream {
                     return Sv1IngressError::DownstreamDropped;
                 };
             }
+            if send.close().await.is_err() {
+                error!("Failed to close connection");
+            };
             error!("Upstream dropped trying to receive");
             Sv1IngressError::TranslatorDropped
         })

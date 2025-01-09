@@ -1,4 +1,4 @@
-//use async_recursion::async_recursion;
+use async_recursion::async_recursion;
 use jemallocator::Jemalloc;
 use roles_logic_sv2::utils::Mutex;
 use router::Router;
@@ -72,10 +72,10 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 }
 
-//#[async_recursion]
+#[async_recursion]
 async fn initialize_proxy(
     router: &mut Router,
-    mut pool_addr: Option<std::net::SocketAddr>,
+    pool_addr: Option<std::net::SocketAddr>,
     epsilon: Duration,
 ) {
     loop {
@@ -173,13 +173,11 @@ async fn initialize_proxy(
 
         match monitor(router, abort_handles, epsilon).await {
             Ok(Reconnect::NewUpstream(new_pool_addr)) => {
-                pool_addr = Some(new_pool_addr);
-                continue;
+                initialize_proxy(router, Some(new_pool_addr), epsilon).await;
             }
             Ok(Reconnect::NoUpstream) => {
                 update_proxy_state(PoolState::Up);
-                pool_addr = None;
-                continue;
+                initialize_proxy(router, None, epsilon).await;
             }
             Err(_) => {
                 info!("An error occurred. Exiting...");
@@ -199,6 +197,7 @@ async fn monitor(
         if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
             info!("Faster upstream detected. Reinitializing proxy...");
             drop(abort_handles);
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await; // Needs a little to time to drop
             return Ok(Reconnect::NewUpstream(new_upstream));
         }
 
@@ -225,6 +224,7 @@ async fn monitor(
         if is_pool_down() {
             error!("Proxy state is DOWN. Reinitializing proxy...");
             drop(abort_handles); // Drop all abort handles
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await; // Needs a little to time to drop
             return Ok(Reconnect::NoUpstream);
         }
 
