@@ -1,9 +1,6 @@
 use super::super::{
     downstream::Downstream,
-    error::{
-        Error::{InvalidExtranonce, PoisonLock},
-        ProxyResult,
-    },
+    error::{Error, ProxyResult},
     upstream::diff_management::UpstreamDifficultyConfig,
 };
 use binary_sv2::U256;
@@ -130,50 +127,48 @@ impl Upstream {
         self_: Arc<Mutex<Self>>,
         incoming_receiver: TReceiver<Mining<'static>>,
         rx_sv2_submit_shares_ext: TReceiver<SubmitSharesExtended<'static>>,
-    ) -> Result<AbortOnDrop, ()> {
+    ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
-        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
-            Ok(Some(abortable)) => Ok(abortable),
-            Ok(None) => {
-                error!("Failed to get Aborter: Not found.");
-                return Err(());
-            }
-            Err(_) => {
-                error!("Failed to acquire lock");
-                return Err(());
-            }
-        };
+        let abortable = task_manager
+            .safe_lock(|t| t.get_aborter())
+            .map_err(|_| Error::TranslatorTaskManagerMutexPoisoned)?
+            .ok_or(Error::TranslatorTaskManagerFailed)?;
 
-        Self::connect(self_.clone()).await.map_err(|_| ())?;
+        Self::connect(self_.clone()).await?; // Propagate error, it will be handled in the caller
 
         let (diff_manager_abortable, main_loop_abortable) =
-            Self::parse_incoming(self_.clone(), incoming_receiver).map_err(|_| ())?;
+            Self::parse_incoming(self_.clone(), incoming_receiver)?;
 
-        let handle_submit_abortable =
-            Self::handle_submit(self_.clone(), rx_sv2_submit_shares_ext).map_err(|_| ())?;
+        let handle_submit_abortable = Self::handle_submit(self_.clone(), rx_sv2_submit_shares_ext)?;
 
-        TaskManager::add_diff_managment(task_manager.clone(), diff_manager_abortable).await?;
-        TaskManager::add_main_loop(task_manager.clone(), main_loop_abortable).await?;
-        TaskManager::add_handle_submit(task_manager.clone(), handle_submit_abortable).await?;
+        TaskManager::add_diff_managment(task_manager.clone(), diff_manager_abortable)
+            .await
+            .map_err(|_| Error::TranslatorTaskManagerFailed)?;
+        TaskManager::add_main_loop(task_manager.clone(), main_loop_abortable)
+            .await
+            .map_err(|_| Error::TranslatorTaskManagerFailed)?;
+        TaskManager::add_handle_submit(task_manager.clone(), handle_submit_abortable)
+            .await
+            .map_err(|_| Error::TranslatorTaskManagerFailed)?;
 
-        abortable
+        Ok(abortable)
     }
 
     /// Setups the connection with the SV2 Upstream role (most typically a SV2 Pool).
     async fn connect(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
         let sender = self_
             .safe_lock(|s| s.sender.clone())
-            .map_err(|_e| PoisonLock)?;
+            .map_err(|_e| Error::TranslatorUpstreamMutexPoisoned)?;
 
         // Send open channel request
         let nominal_hash_rate = self_
             .safe_lock(|u| {
                 u.difficulty_config
                     .safe_lock(|c| c.channel_nominal_hashrate)
-                    .map_err(|_e| PoisonLock)
+                    .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)
             })
-            .map_err(|_e| PoisonLock)??;
-        let user_identity = "ABC".to_string().try_into().expect("Internal error: this opration can not fail because the string ABC can always be converted into Inner");
+            .map_err(|_e| Error::TranslatorUpstreamMutexPoisoned)??;
+        let user_identity = "ABC".to_string().try_into().expect("Internal error: this operation can not fail because the string ABC can always be converted into Inner");
         let open_channel = Mining::OpenExtendedMiningChannel(OpenExtendedMiningChannel {
             request_id: 0, // TODO
             user_identity, // TODO
@@ -187,13 +182,13 @@ impl Upstream {
             .safe_lock(|u| {
                 u.difficulty_config
                     .safe_lock(|d| d.channel_nominal_hashrate = 0.0)
-                    .map_err(|_e| PoisonLock)
+                    .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)
             })
-            .map_err(|_e| PoisonLock)??;
+            .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)??;
 
         if sender.send(open_channel).await.is_err() {
             error!("Failed to send message");
-            return Err(crate::translator::error::Error::AsyncChannelError);
+            return Err(Error::AsyncChannelError);
         };
         Ok(())
     }
@@ -216,20 +211,26 @@ impl Upstream {
                         s.tx_sv2_set_new_prev_hash.clone(),
                     )
                 })
-                .map_err(|_| PoisonLock)?;
+                .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
         let diff_manager_handle = {
             let self_ = self_.clone();
             task::spawn(async move {
                 // No need to start diff management immediatly
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 loop {
-                    // TODO log error
-                    let _ = Self::try_update_hashrate(self_.clone()).await;
+                    if let Err(e) = Self::try_update_hashrate(self_.clone()).await {
+                        error!("Failed to update hashrate: {e:?}");
+                        // Update global upstream state to down
+                        // ProxyState::update_upstream_state(UpstreamState::Down(
+                        //     UpstreamType::TranslatorUpstream,
+                        // ));
+                        return;
+                    };
                 }
             })
         };
 
-        let main_loop_handle = {
+        let main_loop_handle: task::JoinHandle<Result<(), Error<'static>>> = {
             let self_ = self_.clone();
             task::spawn(async move {
                 while let Some(m) = receiver.recv().await {
@@ -251,7 +252,7 @@ impl Upstream {
                             // Relay the response message to the Upstream role
                             if tx_frame.send(message_for_upstream).await.is_err() {
                                 error!("Failed to send message to upstream role");
-                                break;
+                                return Err(Error::AsyncChannelError);
                             };
                         }
                         // Does not send the messages anywhere, but instead handle them internally
@@ -260,16 +261,12 @@ impl Upstream {
                                 Mining::OpenExtendedMiningChannelSuccess(m) => {
                                     let prefix_len = m.extranonce_prefix.len();
                                     // update upstream_extranonce1_size for tracking
-                                    let miner_extranonce2_size = match self_.safe_lock(|u| {
-                                        u.upstream_extranonce1_size = prefix_len;
-                                        u.min_extranonce_size as usize
-                                    }) {
-                                        Ok(extranounce1_size) => extranounce1_size,
-                                        Err(_) => {
-                                            error!("Failed to update extranounce1 size");
-                                            break;
-                                        }
-                                    };
+                                    let miner_extranonce2_size = self_
+                                        .safe_lock(|u| {
+                                            u.upstream_extranonce1_size = prefix_len;
+                                            u.min_extranonce_size as usize
+                                        })
+                                        .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
                                     let extranonce_prefix: Extranonce = m.extranonce_prefix.into();
                                     // Create the extended extranonce that will be saved in bridge and
                                     // it will be used to open downstream (sv1) channels
@@ -287,13 +284,13 @@ impl Upstream {
                                         ..prefix_len + m.extranonce_size as usize; // extranonce2
                                     let extended = match ExtendedExtranonce::from_upstream_extranonce(
                                         extranonce_prefix.clone(), range_0.clone(), range_1.clone(), range_2.clone(),
-                                    ).ok_or_else(|| InvalidExtranonce(format!("Impossible to create a valid extended extranonce from {:?} {:?} {:?} {:?}",
+                                    ).ok_or( Error::InvalidExtranonce(format!("Impossible to create a valid extended extranonce from {:?} {:?} {:?} {:?}",
                                         extranonce_prefix,range_0,range_1,range_2))) {
                                             Ok(extended_extranounce) => extended_extranounce,
-                                            Err(_) => {
+                                            Err(e) => {
                                                 error!(
-                                                    "Failed to create a valid extended extranonce from {:?} {:?} {:?} {:?}",
-                                                    extranonce_prefix, range_0, range_1, range_2
+                                                    "Failed to create a valid extended extranonce from {:?} {:?} {:?} {:?}: {:?}",
+                                                    extranonce_prefix, range_0, range_1, range_2, e
                                                 );
                                                 break;
                                             }
@@ -305,30 +302,26 @@ impl Upstream {
                                         .is_err()
                                     {
                                         error!("Failed to send extended extranounce");
-                                        break;
+                                        return Err(Error::AsyncChannelError);
                                     };
                                 }
                                 Mining::NewExtendedMiningJob(m) => {
                                     let job_id = m.job_id;
 
-                                    if self_
+                                    self_
                                         .safe_lock(|s| {
                                             let _ = s.job_id.insert(job_id);
                                         })
-                                        .is_err()
-                                    {
-                                        error!("Failed to insert job_id");
-                                        break;
-                                    };
+                                        .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
                                     if tx_sv2_new_ext_mining_job.send(m).await.is_err() {
                                         error!("Failed to send NewExtendedMiningJob");
-                                        break;
+                                        return Err(Error::AsyncChannelError);
                                     };
                                 }
                                 Mining::SetNewPrevHash(m) => {
                                     if tx_sv2_set_new_prev_hash.send(m).await.is_err() {
                                         error!("Failed to send SetNewPrevHash");
-                                        break;
+                                        return Err(Error::AsyncChannelError);
                                     };
                                 }
                                 Mining::CloseChannel(_m) => {
@@ -348,12 +341,13 @@ impl Upstream {
                         }
                         Ok(SendTo::None(None)) => (),
                         Ok(_) => panic!(),
-                        Err(_e) => {
-                            break;
+                        Err(e) => {
+                            return Err(Error::RolesSv2Logic(e));
                         }
                     }
                 }
-                // TODO return an appropriate error whenwe exit from the while
+                error!("Failed to receive message In translator upstream parse incoming");
+                Err(Error::Unrecoverable)
             })
         };
         Ok((diff_manager_handle.into(), main_loop_handle.into()))
@@ -376,80 +370,54 @@ impl Upstream {
                     ))
                 }
             })
-            .map_err(|_e| PoisonLock)
+            .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)
     }
 
     fn handle_submit(
         self_: Arc<Mutex<Self>>,
         mut rx_submit: TReceiver<SubmitSharesExtended<'static>>,
     ) -> ProxyResult<'static, AbortOnDrop> {
-        let clone = self_.clone();
-        let tx_frame = clone
+        let tx_frame = self_
             .safe_lock(|s| s.sender.clone())
-            .map_err(|_| PoisonLock)?;
+            .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
 
-        let handle = {
+        let handle: task::JoinHandle<Result<(), Error<'static>>> = {
             let self_ = self_.clone();
             task::spawn(async move {
                 loop {
                     let mut sv2_submit: SubmitSharesExtended = match rx_submit.recv().await {
                         Some(msg) => msg,
                         None => {
-                            error!("Failed to receive message");
-                            return;
+                            error!(
+                                "Failed to receive message in translator upstream handle submit"
+                            );
+                            return Err(Error::Unrecoverable);
                         }
                     };
 
                     let channel_id = self_
                         .safe_lock(|s| {
                             s.channel_id
-                                .ok_or(super::super::error::Error::RolesSv2Logic(
-                                    RolesLogicError::NotFoundChannelId,
-                                ))
+                                .ok_or(Error::RolesSv2Logic(RolesLogicError::NotFoundChannelId))
                         })
-                        .map_err(|_e| PoisonLock);
-                    sv2_submit.channel_id = match channel_id {
-                        Ok(Ok(channel_id)) => channel_id,
-                        Ok(Err(_)) => {
-                            // error retrieving channel_id
-                            error!("Failed to retrieve channel_id");
-                            break;
-                        }
-                        Err(_) => {
-                            //unable to set channel_id
-                            error!("Failed to set sv2_submut channel_id");
-                            //? should break
-                            break;
-                        }
-                    };
+                        .map_err(|_| Error::TranslatorUpstreamMutexPoisoned);
+
+                    sv2_submit.channel_id = channel_id??;
 
                     let job_id = Self::get_job_id(&self_);
-                    sv2_submit.job_id = match job_id {
-                        Ok(Ok(job_id)) => job_id,
-                        Ok(Err(_)) => {
-                            // error retrieving job_id
-                            error!("Failed to retrieve job_id");
-                            //? should break
-                            break;
-                        }
-                        Err(_) => {
-                            //unable to set job_id
-                            error!("Failed to set sv2_submut job_id");
-                            //? should break
-                            break;
-                        }
-                    };
+                    sv2_submit.job_id = job_id??;
 
                     let message =
                         roles_logic_sv2::parsers::Mining::SubmitSharesExtended(sv2_submit);
 
                     if tx_frame.send(message).await.is_err() {
                         error!("Unable to send SubmitSharesExtended msg upstream");
-                        break;
+                        return Err(Error::AsyncChannelError);
                     };
                 }
             })
         };
+
         Ok(handle.into())
     }
 

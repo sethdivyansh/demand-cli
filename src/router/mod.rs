@@ -121,7 +121,7 @@ impl Router {
             tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
             AbortOnDrop,
         ),
-        (),
+        minin_pool_connection::errors::Error,
     > {
         let pool = match pool_addr {
             Some(addr) => addr,
@@ -130,7 +130,7 @@ impl Router {
                 // Called when we initialize the proxy, without a valid pool we can not start mine and we
                 // return Err
                 None => {
-                    return Err(());
+                    return Err(minin_pool_connection::errors::Error::Unrecoverable);
                 }
             },
         };
@@ -150,7 +150,7 @@ impl Router {
                 Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
             }
 
-            Err(_) => Err(()),
+            Err(e) => Err(e),
         }
     }
 

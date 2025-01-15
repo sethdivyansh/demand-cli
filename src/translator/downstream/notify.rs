@@ -1,4 +1,5 @@
 use crate::translator::downstream::SUBSCRIBE_TIMEOUT_SECS;
+use crate::translator::error::Error;
 
 use super::{downstream::Downstream, task_manager::TaskManager};
 use roles_logic_sv2::utils::Mutex;
@@ -16,27 +17,19 @@ pub async fn start_notify(
     last_notify: Option<server_to_client::Notify<'static>>,
     host: String,
     connection_id: u32,
-) -> Result<(), ()> {
+) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut first_sent = false;
             loop {
-                let is_a = match downstream.safe_lock(|d| !d.authorized_names.is_empty()) {
-                    Ok(is_a) => is_a,
-                    Err(e) => {
-                        error!("{}", e);
-                        break;
-                    }
-                };
+                let is_a = downstream
+                    .safe_lock(|d| !d.authorized_names.is_empty())
+                    .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
                 if is_a && !first_sent && last_notify.is_some() {
-                    if Downstream::init_difficulty_management(&downstream)
-                        .await
-                        .is_err()
-                    {
-                        error!("Failed to initialize difficult management");
-                        break;
+                    if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
+                        error!("Failed to initailize difficulty managemant {e}")
                     };
 
                     let sv1_mining_notify_msg = match last_notify.clone() {
@@ -47,44 +40,27 @@ pub async fn start_notify(
                         }
                     };
                     let message: json_rpc::Message = sv1_mining_notify_msg.into();
-                    if Downstream::send_message_downstream(downstream.clone(), message)
-                        .await
-                        .is_err()
-                    {
-                        error!("Failed to send msg downstream");
-                        break;
-                    };
-                    if let Err(e) = downstream.clone().safe_lock(|s| {
-                        s.first_job_received = true;
-                    }) {
-                        error!("{}", e);
-                        break;
-                    }
+                    Downstream::send_message_downstream(downstream.clone(), message).await;
+                    downstream
+                        .clone()
+                        .safe_lock(|s| {
+                            s.first_job_received = true;
+                        })
+                        .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
                     first_sent = true;
                 } else if is_a && last_notify.is_some() {
-                    if start_update(task_manager, downstream.clone())
-                        .await
-                        .is_err()
-                    {
+                    if let Err(e) = start_update(task_manager, downstream.clone()).await {
                         warn!("Translator impossible to start update task");
-                        break;
+                        return Err(e);
                     };
 
                     while let Ok(sv1_mining_notify_msg) = rx_sv1_notify.recv().await {
-                        if downstream
+                        downstream
                             .safe_lock(|d| d.last_notify = Some(sv1_mining_notify_msg.clone()))
-                            .is_err()
-                        {
-                            error!("Failed to acquire lock");
-                            return;
-                        };
+                            .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
+
                         let message: json_rpc::Message = sv1_mining_notify_msg.into();
-                        if Downstream::send_message_downstream(downstream.clone(), message)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        };
+                        Downstream::send_message_downstream(downstream.clone(), message).await;
                     }
                     break;
                 } else {
@@ -106,30 +82,31 @@ pub async fn start_notify(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host
             );
+            Ok::<(), Error<'static>>(())
         })
     };
-    TaskManager::add_notify(task_manager, handle.into()).await
+    TaskManager::add_notify(task_manager, handle.into())
+        .await
+        .map_err(|_| Error::TranslatorTaskManagerFailed)
 }
 
 async fn start_update(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
-) -> Result<(), ()> {
-    let handle = task::spawn(async move {
+) -> Result<(), Error<'static>> {
+    let handle: task::JoinHandle<Result<(), Error<'static>>> = task::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-            let ln = match downstream.safe_lock(|d| d.last_notify.clone()) {
-                Ok(ln) => ln,
-                Err(_) => {
-                    error!("Failed to acquire lock");
-                    return;
-                }
-            };
+            let ln = downstream
+                .safe_lock(|d| d.last_notify.clone())
+                .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
             assert!(ln.is_some());
             // if hashrate has changed, update difficulty management, and send new
             // mining.set_difficulty
-            let _ = Downstream::try_update_difficulty_settings(&downstream, ln).await;
+            Downstream::try_update_difficulty_settings(&downstream, ln).await?;
         }
     });
-    TaskManager::add_update(task_manager, handle.into()).await
+    TaskManager::add_update(task_manager, handle.into())
+        .await
+        .map_err(|_| Error::TranslatorTaskManagerFailed)
 }

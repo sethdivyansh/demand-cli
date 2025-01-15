@@ -1,12 +1,15 @@
-use crate::{shared::utils::AbortOnDrop, translator::error::Error};
+use crate::{
+    proxy_state::{DownstreamState, DownstreamType, ProxyState},
+    shared::utils::AbortOnDrop,
+    translator::error::Error,
+};
 
 use super::{
-    super::{error::ProxyResult, upstream::diff_management::UpstreamDifficultyConfig},
-    task_manager::TaskManager,
+    super::upstream::diff_management::UpstreamDifficultyConfig, task_manager::TaskManager,
 };
 use tokio::sync::{
     broadcast,
-    mpsc::{channel, error::SendError, Receiver, Sender},
+    mpsc::{channel, Receiver, Sender},
 };
 
 use super::{
@@ -114,21 +117,22 @@ impl Downstream {
         }));
 
         // TODO handle error
-        if start_receive_downstream(
+        if let Err(e) = start_receive_downstream(
             task_manager.clone(),
             downstream.clone(),
             recv_from_down,
             connection_id,
         )
         .await
-        .is_err()
         {
-            error!("Failed yo start receive downstream task");
-            return;
+            error!("Failed to start receive downstream task: {e}");
+            ProxyState::update_downstream_state(DownstreamState::Down(
+                DownstreamType::TranslatorDownstream,
+            ));
         };
 
         // TODO handle error
-        if start_send_to_downstream(
+        if let Err(e) = start_send_to_downstream(
             task_manager.clone(),
             receiver_outgoing,
             send_to_down,
@@ -136,13 +140,14 @@ impl Downstream {
             host.clone(),
         )
         .await
-        .is_err()
         {
-            error!("Failed to start send_to_downstream task");
-            return;
+            error!("Failed to start send_to_downstream task {e}");
+            ProxyState::update_downstream_state(DownstreamState::Down(
+                DownstreamType::TranslatorDownstream,
+            ));
         };
 
-        if start_notify(
+        if let Err(e) = start_notify(
             task_manager.clone(),
             downstream.clone(),
             rx_sv1_notify,
@@ -151,9 +156,11 @@ impl Downstream {
             connection_id,
         )
         .await
-        .is_err()
         {
-            error!("Failed to start notify task");
+            error!("Failed to start notify task: {e}");
+            ProxyState::update_downstream_state(DownstreamState::Down(
+                DownstreamType::TranslatorDownstream,
+            ));
         };
     }
 
@@ -165,22 +172,13 @@ impl Downstream {
         bridge: Arc<Mutex<super::super::proxy::Bridge>>,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
-    ) -> Result<AbortOnDrop, ()> {
+    ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
-        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
-            Ok(Some(abortable)) => Ok(abortable),
-            // Aborter is None
-            Ok(None) => {
-                error!("Failed to get Aborter: Not found.");
-                return Err(());
-            }
-            // Failed to acquire lock
-            Err(_) => {
-                error!("Failed to acquire lock");
-                return Err(());
-            }
-        };
-        start_accept_connection(
+        let abortable = task_manager
+            .safe_lock(|t| t.get_aborter())
+            .map_err(|_| Error::TranslatorTaskManagerMutexPoisoned)?
+            .ok_or(Error::TranslatorTaskManagerFailed)?;
+        if let Err(e) = start_accept_connection(
             task_manager.clone(),
             tx_sv1_submit,
             tx_mining_notify,
@@ -188,8 +186,11 @@ impl Downstream {
             upstream_difficulty_config,
             downstreams,
         )
-        .await?;
-        abortable
+        .await
+        {
+            error!("Translator downstream failed to accept: {e}");
+        };
+        Ok(abortable)
     }
 
     /// As SV1 messages come in, determines if the message response needs to be translated to SV2
@@ -211,10 +212,7 @@ impl Downstream {
                     // message will be sent to the upstream Translator to be translated to SV2 and
                     // forwarded to the `Upstream`
                     // let sender = self_.safe_lock(|s| s.connection.sender_upstream)
-                    if let Err(e) = Self::send_message_downstream(self_, r.into()).await {
-                        error!("{}", e);
-                        todo!();
-                    }
+                    Self::send_message_downstream(self_, r.into()).await;
                     Ok(())
                 } else {
                     // If None response is received, indicates this SV1 message received from the
@@ -224,8 +222,8 @@ impl Downstream {
             }
             // TODO
             Err(e) => {
-                error!("{}", e);
-                todo!()
+                error!("{e}");
+                Err(Error::V1Protocol(e))
             }
         }
     }
@@ -235,25 +233,38 @@ impl Downstream {
     pub(super) async fn send_message_downstream(
         self_: Arc<Mutex<Self>>,
         response: json_rpc::Message,
-    ) -> Result<(), SendError<sv1_api::Message>> {
+    ) {
         let sender = match self_.safe_lock(|s| s.tx_outgoing.clone()) {
             Ok(sender) => sender,
-            Err(_) => return Ok(()),
+            Err(_) => {
+                // Poisoned mutex
+                ProxyState::update_downstream_state(DownstreamState::Down(
+                    DownstreamType::TranslatorDownstream,
+                ));
+                return;
+            }
         };
-        sender.send(response).await
+        let _ = sender.send(response).await;
     }
 
     /// Send SV1 response message that is generated by `Downstream` (as opposed to being received
     /// by `Bridge`) to be written to the SV1 Downstream role.
-    pub(super) async fn send_message_upstream(
-        self_: &Arc<Mutex<Self>>,
-        msg: DownstreamMessages,
-    ) -> ProxyResult<'static, ()> {
-        let sender = self_
-            .safe_lock(|s| s.tx_sv1_bridge.clone())
-            .map_err(|_| Error::PoisonLock)?;
-        let _ = sender.send(msg).await;
-        Ok(())
+    pub(super) async fn send_message_upstream(self_: &Arc<Mutex<Self>>, msg: DownstreamMessages) {
+        let sender = match self_.safe_lock(|s| s.tx_sv1_bridge.clone()) {
+            Ok(sender) => sender,
+            Err(_) => {
+                // Poisoned mutex
+                ProxyState::update_downstream_state(DownstreamState::Down(
+                    DownstreamType::TranslatorDownstream,
+                ));
+                return;
+            }
+        };
+        if sender.send(msg).await.is_err() {
+            ProxyState::update_downstream_state(DownstreamState::Down(
+                DownstreamType::TranslatorDownstream,
+            ));
+        }
     }
     #[cfg(test)]
     pub fn new(
@@ -354,12 +365,11 @@ impl IsServer<'static> for Downstream {
                 extranonce2_len: self.extranonce2_len,
                 version_rolling_mask: self.version_rolling_mask.clone(),
             };
-            if self
+            if let Err(e) = self
                 .tx_sv1_bridge
                 .try_send(DownstreamMessages::SubmitShares(to_send))
-                .is_err()
             {
-                error!("Failed to start receive downstream task");
+                error!("Failed to start receive downstream task: {e:?}");
                 // Return false because submit was not properly handled
                 return false;
             };

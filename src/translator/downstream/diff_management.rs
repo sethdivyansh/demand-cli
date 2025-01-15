@@ -12,7 +12,7 @@ use std::{ops::Div, sync::Arc};
 use sv1_api::json_rpc;
 
 use bitcoin::util::uint::Uint256;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 // TODO redesign it to not use all this mutexes
 impl Downstream {
@@ -29,13 +29,13 @@ impl Downstream {
                 d.difficulty_mgmt.timestamp_of_last_update = timestamp_millis;
                 d.difficulty_mgmt.submits_since_last_update = 0;
             })
-            .map_err(|_e| Error::PoisonLock)?;
+            .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
         let (message, _) = target_to_sv1_message(
             crate::EXPECTED_SV1_HASHPOWER.into(),
             crate::SHARE_PER_MIN.into(),
         )?;
-        Downstream::send_message_downstream(self_.clone(), message).await?;
+        Downstream::send_message_downstream(self_.clone(), message).await;
 
         Ok(())
     }
@@ -73,7 +73,7 @@ impl Downstream {
         let (down_diff_config, channel_id) = self_
             .clone()
             .safe_lock(|d| (d.difficulty_mgmt.clone(), d.connection_id))
-            .map_err(|_e| Error::PoisonLock)?;
+            .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
         let prev_target = match hash_rate_to_target(
             down_diff_config.estimated_downstream_hash_rate.into(),
@@ -112,10 +112,10 @@ impl Downstream {
         // Send messages downstream
         let (message, target) =
             target_to_sv1_message(estimated_hash_rate.into(), shares_per_minute.into())?;
-        Downstream::send_message_downstream(self_.clone(), message).await?;
+        Downstream::send_message_downstream(self_.clone(), message).await;
 
         if let Some(notify) = last_notify {
-            Downstream::send_message_downstream(self_.clone(), notify.into()).await?;
+            Downstream::send_message_downstream(self_.clone(), notify.into()).await;
         }
 
         // Notify bridge of target update.
@@ -127,7 +127,7 @@ impl Downstream {
             self_,
             DownstreamMessages::SetDownstreamTarget(update_target_msg),
         )
-        .await?;
+        .await;
         Ok(())
     }
 
@@ -222,7 +222,8 @@ impl Downstream {
         // We received too few shares in the interval to estimate a correct hashrate. If delta_time
         // is big enaugh we just try with last estimated hash rate divided by 1.5.
         if realized_share_per_min.is_nan() {
-            panic!("realized_share_per_min should not be nan");
+            error!("realized_share_per_min should not be nan");
+            Err(Error::Unrecoverable)
         } else if realized_share_per_min == 0.0 || realized_share_per_min.is_infinite() {
             if time_delta_millis < 5 * 1000 {
                 Ok(None)
@@ -236,7 +237,8 @@ impl Downstream {
                 Ok(Some(new_estimation as f32))
             }
         } else if realized_share_per_min.is_sign_negative() {
-            panic!("realized_share_per_min should not be negative");
+            error!("realized_share_per_min should not be negative"); //? check panic!() or not
+            return Err(Error::Unrecoverable);
         } else {
             let new_estimation = hash_rate_from_target(miner_target, realized_share_per_min)?;
 

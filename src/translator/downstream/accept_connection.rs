@@ -1,4 +1,6 @@
-use crate::translator::{proxy::Bridge, upstream::diff_management::UpstreamDifficultyConfig};
+use crate::translator::{
+    error::Error, proxy::Bridge, upstream::diff_management::UpstreamDifficultyConfig,
+};
 
 use super::{downstream::Downstream, task_manager::TaskManager, DownstreamMessages};
 use roles_logic_sv2::utils::Mutex;
@@ -18,7 +20,7 @@ pub async fn start_accept_connection(
     bridge: Arc<Mutex<super::super::proxy::Bridge>>,
     upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     mut downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
-) -> Result<(), ()> {
+) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
         task::spawn(async move {
@@ -33,11 +35,9 @@ pub async fn start_accept_connection(
                     error!("Bridge not ready");
                     break;
                 };
-                let open_sv1_downstream =
-                    match bridge.safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate)) {
-                        Ok(open_sv1_downstream) => open_sv1_downstream,
-                        Err(_) => break,
-                    };
+                let open_sv1_downstream = bridge
+                    .safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate))
+                    .map_err(|_| Error::BridgeMutexPoisoned)?;
 
                 match open_sv1_downstream {
                     Ok(opened) => {
@@ -58,15 +58,18 @@ pub async fn start_accept_connection(
                             recv,
                             task_manager.clone(),
                         )
-                        .await;
+                        .await
                     }
                     Err(e) => {
-                        error!("{}", e.to_string());
-                        panic!();
+                        error!("{e:?}");
+                        return Err(e);
                     }
                 }
             }
+            Ok(())
         })
     };
-    TaskManager::add_accept_connection(task_manager, handle.into()).await
+    TaskManager::add_accept_connection(task_manager, handle.into())
+        .await
+        .map_err(|_| Error::TranslatorTaskManagerFailed)
 }

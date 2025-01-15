@@ -11,6 +11,17 @@ pub enum Error<'a> {
     V1Protocol(sv1_api::error::Error<'a>),
     // Locking Errors
     PoisonLock,
+    TranslatorUpstreamMutexPoisoned,
+    TranslatorDiffConfigMutexPoisoned,
+    TranslatorTaskManagerMutexPoisoned,
+    TranslatorDownstreamMutexPoisoned,
+    BridgeMutexPoisoned,
+    BridgeTaskManagerMutexPoisoned,
+    // Task Manager Errors
+    TranslatorTaskManagerFailed,
+    BridgeTaskManagerFailed,
+    // Unrecoverable Errors
+    Unrecoverable,
     // used to handle SV2 protocol error messages from pool
     #[allow(clippy::enum_variant_names)]
     TargetError(roles_logic_sv2::errors::Error),
@@ -37,6 +48,21 @@ impl fmt::Display for Error<'_> {
             Error::Infallible(e) => write!(f, "Infallible {}", e),
             Error::ImpossibleToOpenChannnel => write!(f, "ImpossibleToOpenChannnel"),
             Error::AsyncChannelError => write!(f, "AsyncChannelError"),
+            Error::TranslatorUpstreamMutexPoisoned => write!(f, "TranslatorUpstreamMutexPoisoned"),
+            Error::TranslatorDiffConfigMutexPoisoned => {
+                write!(f, "TranslatorDiffConfigMutexPoisoned")
+            }
+            Error::TranslatorTaskManagerMutexPoisoned => {
+                write!(f, "TranslatorTaskManagerMutexPoisoned")
+            }
+            Error::TranslatorDownstreamMutexPoisoned => {
+                write!(f, "TranslatorDownstreamMutexPoisoned")
+            }
+            Error::BridgeMutexPoisoned => write!(f, "BridgeMutexPoisoned"),
+            Error::BridgeTaskManagerMutexPoisoned => write!(f, "BridgeTaskManagerMutexPoisoned"),
+            Error::TranslatorTaskManagerFailed => write!(f, "TranslatorTaskManagerFailed"),
+            Error::BridgeTaskManagerFailed => write!(f, "BridgeTaskManagerFailed"),
+            Error::Unrecoverable => write!(f, "Unrecoverable"),
         }
     }
 }

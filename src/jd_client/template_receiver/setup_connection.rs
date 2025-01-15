@@ -1,3 +1,4 @@
+use crate::jd_client::error::Error;
 use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
 use roles_logic_sv2::{
     common_messages_sv2::{Protocol, SetupConnection},
@@ -39,26 +40,31 @@ impl SetupConnectionHandler {
         receiver: &mut TReceiver<EitherFrame>,
         sender: &mut TSender<EitherFrame>,
         address: SocketAddr,
-    ) -> Result<(), ()> {
+    ) -> Result<(), Error> {
         let setup_connection = Self::get_setup_connection_message(address);
 
         let sv2_frame: StdFrame = PoolMessages::Common(setup_connection.into())
             .try_into()
-            .map_err(|_| ())?;
+            .expect("Internal error: this operation can not fail because PoolMessage::Common can always be converted into StdFrame");
         let sv2_frame = sv2_frame.into();
-        sender.send(sv2_frame).await.map_err(|_| ())?;
-
-        let mut incoming: StdFrame = receiver
-            .recv()
+        sender
+            .send(sv2_frame)
             .await
-            .expect("Connection to TP closed!")
-            .try_into()
-            .expect("Failed to parse incoming SetupConnectionResponse");
+            .map_err(|_| Error::Unrecoverable)?;
+
+        let mut incoming: StdFrame = match receiver.recv().await {
+            Some(msg) => msg.try_into()?,
+            None => {
+                error!("Failed to parse incoming SetupConnectionResponse");
+                return Err(Error::Unrecoverable);
+            }
+        };
+
         let message_type = match incoming.get_header() {
             Some(header) => header.msg_type(),
             None => {
                 error!("Message header is None");
-                return Err(());
+                return Err(Error::Unrecoverable);
             }
         };
         let payload = incoming.payload();
@@ -68,7 +74,7 @@ impl SetupConnectionHandler {
             payload,
             CommonRoutingLogic::None,
         )
-        .map_err(|_| ())?;
+        .map_err(Error::RolesSv2Logic)?;
         Ok(())
     }
 }

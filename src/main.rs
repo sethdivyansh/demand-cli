@@ -8,6 +8,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
+use proxy_state::{PoolState, ProxyState, TpState};
 use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info};
@@ -15,6 +16,7 @@ use tracing::{error, info};
 mod ingress;
 pub mod jd_client;
 mod minin_pool_connection;
+mod proxy_state;
 mod router;
 mod share_accounter;
 mod shared;
@@ -46,8 +48,7 @@ lazy_static! {
     static ref TP_ADDRESS: Option<String> = std::env::var("TP_ADDRESS").ok();
 }
 lazy_static! {
-    static ref PROXY_STATE: Arc<Mutex<ProxyState>> =
-        Arc::new(Mutex::new(ProxyState::Pool(PoolState::Up)));
+    static ref PROXY_STATE: Arc<Mutex<ProxyState>> = Arc::new(Mutex::new(ProxyState::new()));
 }
 
 #[tokio::main]
@@ -99,10 +100,15 @@ async fn initialize_proxy(
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
         let (translator_up_tx, mut translator_up_rx) = channel(10);
-        let translator_abortable = translator::start(downs_sv1_rx, translator_up_tx)
-            .await
-            // Impossible to start the proxy is ok to fail
-            .expect("Impossible to initialize translator");
+        let translator_abortable = match translator::start(downs_sv1_rx, translator_up_tx).await {
+            Ok(abortable) => abortable,
+            Err(e) => {
+                error!("Impossible to initialize translator: {e}");
+                // Impossible to start the proxy so we restart proxy
+                ProxyState::update_tp_state(TpState::Down);
+                return;
+            }
+        };
 
         let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
         let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) = channel(10);
@@ -124,7 +130,10 @@ async fn initialize_proxy(
                 .await
                 {
                     Ok(jdc_abortable) => jdc_abortable,
-                    Err(_) => return,
+                    Err(e) => {
+                        error!("Failed to start jd_client: {e}");
+                        return;
+                    }
                 },
             );
             share_accounter_abortable = match share_accounter::start(
@@ -173,10 +182,11 @@ async fn initialize_proxy(
 
         match monitor(router, abort_handles, epsilon).await {
             Ok(Reconnect::NewUpstream(new_pool_addr)) => {
+                ProxyState::update_proxy_state_up(); // Update global proxy state to Up before reinitializing
                 initialize_proxy(router, Some(new_pool_addr), epsilon).await;
             }
             Ok(Reconnect::NoUpstream) => {
-                update_proxy_state(PoolState::Up);
+                ProxyState::update_proxy_state_up(); // Update global proxy state to Up before reinitializing
                 initialize_proxy(router, None, epsilon).await;
             }
             Err(_) => {
@@ -211,20 +221,32 @@ async fn monitor(
                 drop(handle);
             }
 
-            // Check if the pool state is down, and if so, reinitialize the proxy.
-            if is_pool_down() {
-                error!("Proxy state is DOWN. Reinitializing proxy...");
+            // Check if the proxy state is down, and if so, reinitialize the proxy.
+            let is_proxy_down = PROXY_STATE
+                .safe_lock(|proxy| proxy.is_proxy_down())
+                .unwrap();
+            if is_proxy_down.0 {
+                error!(
+                    "{:?} is DOWN. Reinitializing proxy...",
+                    is_proxy_down.1.unwrap_or("Proxy".to_string())
+                );
                 return Ok(Reconnect::NoUpstream);
             } else {
                 return Err(()); // Proxy is up
             }
         }
 
-        // Check if the pool state is down, and if so, reinitialize the proxy.
-        if is_pool_down() {
-            error!("Proxy state is DOWN. Reinitializing proxy...");
+        // Check if the proxy state is down, and if so, reinitialize the proxy.
+        let is_proxy_down = PROXY_STATE
+            .safe_lock(|proxy| proxy.is_proxy_down())
+            .unwrap();
+        if is_proxy_down.0 {
+            error!(
+                "{:?} is DOWN. Reinitializing proxy...",
+                is_proxy_down.1.unwrap_or("Proxy".to_string())
+            );
             drop(abort_handles); // Drop all abort handles
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await; // Needs a little to time to drop
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await; // Needs a little to time to drop
             return Ok(Reconnect::NoUpstream);
         }
 
@@ -232,43 +254,7 @@ async fn monitor(
     }
 }
 
-// To keep track of proxy global state
-#[derive(Debug, Clone, Copy)]
-pub enum ProxyState {
-    Pool(PoolState),
-}
-
-// To keep track of the status of the Pool
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PoolState {
-    Up,
-    Down,
-}
-
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
-}
-
-// Checks the states of Pool, and subsequently (Translator,JD, etc) and updates the ProxyState to show the state.
-pub fn update_proxy_state(pool: PoolState) {
-    if PROXY_STATE
-        .safe_lock(|proxy_state| {
-            // If any of the states is "Down", we change the ProxyState to reflect that.
-            *proxy_state = match pool {
-                PoolState::Down => ProxyState::Pool(PoolState::Down),
-                _ => ProxyState::Pool(PoolState::Up),
-            };
-        })
-        .is_err()
-    {
-        error!("Error updating proxy state");
-    }
-}
-
-// Check if the proxy state is down
-fn is_pool_down() -> bool {
-    PROXY_STATE
-        .safe_lock(|proxy_state| matches!(*proxy_state, ProxyState::Pool(PoolState::Down)))
-        .unwrap_or(false)
 }

@@ -1,5 +1,7 @@
+mod errors;
 mod task_manager;
 
+use errors::Error;
 use std::sync::Arc;
 use tracing::error;
 
@@ -9,45 +11,31 @@ use parser::{PoolExtMessages, ShareAccountingMessages};
 use roles_logic_sv2::{mining_sv2::SubmitSharesSuccess, parsers::Mining};
 use task_manager::TaskManager;
 
-use crate::{shared::utils::AbortOnDrop, update_proxy_state, PoolState};
+use crate::{proxy_state::ProxyState, shared::utils::AbortOnDrop, PoolState};
 
 pub async fn start(
     receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
     up_sender: tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
-) -> Result<AbortOnDrop, ()> {
+) -> Result<AbortOnDrop, Error> {
     let task_manager = TaskManager::initialize();
     let shares_sent_up = Arc::new(DashMap::with_capacity(100));
-    let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
-        Ok(Some(abortable)) => Ok(abortable),
-        // Aborter is None
-        Ok(None) => {
-            error!("Failed to get Aborter: Not found.");
-            return Err(());
-        }
-        // Failed tp acquire lock
-        Err(_) => {
-            error!("Failed to acquire lock");
-            return Err(());
-        }
-    };
+    let abortable = task_manager
+        .safe_lock(|t| t.get_aborter())
+        .map_err(|_| Error::ShareAccounterTaskManagerMutexCorrupted)?
+        .ok_or(Error::ShareAccounterTaskManagerError)?;
+
     let relay_up_task = relay_up(receiver, up_sender, shares_sent_up.clone());
-    if TaskManager::add_relay_up(task_manager.clone(), relay_up_task)
+    TaskManager::add_relay_up(task_manager.clone(), relay_up_task)
         .await
-        .is_err()
-    {
-        error!("Failed to add Share accounter relay up task");
-    };
+        .map_err(|_| Error::ShareAccounterTaskManagerError)?;
 
     let relay_down_task = relay_down(up_receiver, sender, shares_sent_up.clone());
-    if TaskManager::add_relay_down(task_manager.clone(), relay_down_task)
+    TaskManager::add_relay_down(task_manager.clone(), relay_down_task)
         .await
-        .is_err()
-    {
-        error!("Failed to add Share accounter relay up task");
-    };
-    abortable
+        .map_err(|_| Error::ShareAccounterTaskManagerError)?;
+    Ok(abortable)
 }
 
 struct ShareSentUp {
@@ -98,7 +86,7 @@ fn relay_down(
                             None => {
                                 error!("Pool sent invalid share success");
                                 // Set global pool state to Down
-                                update_proxy_state(PoolState::Down);
+                                ProxyState::update_pool_state(PoolState::Down);
                                 return;
                             }
                         };
@@ -109,20 +97,22 @@ fn relay_down(
                             new_submits_accepted_count: 1,
                             new_shares_sum: 1,
                         });
-                        if sender.send(success).await.is_err() {
+                        if let Err(e) = sender.send(success).await {
+                            error!("{e:?}"); //? check should update proxy or not
                             break;
                         }
                     };
                 }
                 PoolExtMessages::Mining(msg) => {
-                    if sender.send(msg).await.is_err() {
+                    if let Err(e) = sender.send(msg).await {
+                        error!("{e}");
                         break;
                     }
                 }
                 _ => {
                     //panic!("Pool send unexpected message on mining connection")
                     //Instead of panicking we set the global pool state to down
-                    update_proxy_state(PoolState::Down);
+                    ProxyState::update_pool_state(PoolState::Down);
                     return;
                 }
             }

@@ -1,3 +1,6 @@
+use crate::proxy_state::{
+    DownstreamState, DownstreamType, ProxyState, UpstreamState, UpstreamType,
+};
 use crate::{jd_client::error::Error, jd_client::error::ProxyResult, shared::utils::AbortOnDrop};
 
 use crate::jd_client::mining_downstream::DownstreamMiningNode as Downstream;
@@ -111,17 +114,14 @@ pub struct Upstream {
 
 impl Upstream {
     pub async fn send(self_: &Arc<Mutex<Self>>, message: Mining<'static>) -> ProxyResult<()> {
-        let sender = match self_.safe_lock(|s| s.sender.clone()) {
-            Ok(sender) => sender,
-            Err(_) => return Err(Error::PoisonLock),
-        };
+        let sender = self_
+            .safe_lock(|s| s.sender.clone())
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?;
 
-        // TODO TODO TODO
-        if sender.send(message).await.is_err() {
-            error!("Failed to send message");
-            // what type of error to return?
-            return Err(Error::Unrecoverable);
-        };
+        sender
+            .send(message)
+            .await
+            .map_err(|_| Error::Unrecoverable)?;
         Ok(())
     }
     /// Instantiate a new `Upstream`.
@@ -164,11 +164,11 @@ impl Upstream {
         info!("Sending set custom mining job");
         let request_id = self_
             .safe_lock(|s| s.req_ids.next())
-            .map_err(|_| Error::PoisonLock)?;
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?;
         let channel_id = loop {
             if let Some(id) = self_
                 .safe_lock(|s| s.channel_id)
-                .map_err(|_| Error::PoisonLock)?
+                .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
             {
                 break id;
             };
@@ -203,7 +203,7 @@ impl Upstream {
                 s.template_to_job_id
                     .register_template_id(template_id, request_id)
             })
-            .map_err(|_| Error::PoisonLock)?;
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?;
         Self::send(self_, message).await
     }
 
@@ -216,11 +216,11 @@ impl Upstream {
         let task_manager = TaskManager::initialize();
         let abortable = match task_manager
             .safe_lock(|t| t.get_aborter())
-            .map_err(|_| Error::PoisonLock)?
+            .map_err(|_| Error::JdClientUpstreamTaskManagerFailed)?
         {
             Some(abortable) => abortable,
             None => {
-                return Err(Error::Unrecoverable); // More accurate error type to return here?
+                return Err(Error::Unrecoverable);
             }
         };
         let main_task = {
@@ -232,6 +232,8 @@ impl Upstream {
                         Some(msg) => msg,
                         None => {
                             error!("Upstream down");
+                            //? check
+                            // Update the proxy state to reflect the Tp is down
                             return;
                         }
                     };
@@ -254,31 +256,37 @@ impl Upstream {
                         Ok(SendTo::RelaySameMessageToRemote(downstream_mutex)) => {
                             if Downstream::send(&downstream_mutex, incoming).await.is_err() {
                                 error!("Failed to send message downstream");
-                                // break;
+                                // Update global proxy downstream state
+                                ProxyState::update_downstream_state(DownstreamState::Down(
+                                    DownstreamType::JdClientMiningDownstream,
+                                ));
+                                return;
                             };
                         }
                         Ok(SendTo::None(_)) => (),
                         Ok(_) => unreachable!(),
-                        Err(_e) => {
-                            // TODO TODO TODO
+                        Err(e) => {
+                            error!("{e:?}");
+                            ProxyState::update_upstream_state(UpstreamState::Down(
+                                UpstreamType::JDCMiningUpstream,
+                            ));
                         }
                     }
                 }
             })
         };
-        if TaskManager::add_main_task(task_manager.clone(), main_task.into())
+        TaskManager::add_main_task(task_manager.clone(), main_task.into())
             .await
-            .is_err()
-        {
-            error!("Failed to add task to task manager");
-        }
+            .map_err(|_| Error::JdClientUpstreamTaskManagerFailed)?;
         Ok(abortable)
     }
 
-    pub async fn take_channel_factory(self_: Arc<Mutex<Self>>) -> Result<PoolChannelFactory, ()> {
+    pub async fn take_channel_factory(
+        self_: Arc<Mutex<Self>>,
+    ) -> Result<PoolChannelFactory, Error> {
         while self_
             .safe_lock(|s| s.channel_factory.is_none())
-            .map_err(|_| ())?
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
         {
             tokio::task::yield_now().await;
         }
@@ -287,22 +295,22 @@ impl Upstream {
             .safe_lock(|s| {
                 let mut factory = None;
                 std::mem::swap(&mut s.channel_factory, &mut factory);
-                factory.ok_or(())
+                factory.ok_or(Error::Unrecoverable)
             })
-            .map_err(|_| ())?
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
     }
 
-    pub async fn get_job_id(self_: &Arc<Mutex<Self>>, template_id: u64) -> u32 {
+    pub async fn get_job_id(self_: &Arc<Mutex<Self>>, template_id: u64) -> Result<u32, Error> {
         loop {
-            match self_.safe_lock(|s| s.template_to_job_id.get_job_id(template_id)) {
-                Ok(Some(id)) => return id,
-                Ok(None) => {
+            match self_
+                .safe_lock(|s| s.template_to_job_id.get_job_id(template_id))
+                .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
+            {
+                Some(id) => return Ok(id),
+                None => {
+                    //? check
                     // job_id not found
                     debug!("Job ID not found for template_id: {}", template_id);
-                }
-                Err(e) => {
-                    // Error acquring lock
-                    error!("Error acquiring lock or accessing job ID: {}", e);
                 }
             }
             tokio::task::yield_now().await;
@@ -416,7 +424,9 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             vec![],
             vec![],
         )
-        .expect("Signature + extranonce lens exceed 32 bytes");
+        .inspect_err(|_| {
+            error!("Signature + extranonce lens exceed 32 bytes");
+        })?;
         let extranonce: Extranonce = m
             .extranonce_prefix
             .into_static()

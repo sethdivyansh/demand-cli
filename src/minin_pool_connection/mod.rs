@@ -1,3 +1,4 @@
+pub(crate) mod errors;
 mod task_manager;
 
 use std::net::SocketAddr;
@@ -5,6 +6,7 @@ use std::net::SocketAddr;
 use codec_sv2::{HandshakeRole, StandardEitherFrame, StandardSv2Frame};
 use demand_share_accounting_ext::parser::PoolExtMessages;
 use demand_sv2_connection::noise_connection_tokio::Connection;
+use errors::Error;
 use key_utils::Secp256k1PublicKey;
 use noise_sv2::Initiator;
 use rand::distributions::{Alphanumeric, DistString};
@@ -16,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info};
 
-use crate::{shared::utils::AbortOnDrop, update_proxy_state, PoolState};
+use crate::{proxy_state::ProxyState, shared::utils::AbortOnDrop, PoolState};
 use task_manager::TaskManager;
 
 pub type Message = PoolExtMessages<'static>;
@@ -36,7 +38,7 @@ pub async fn connect_pool(
         Receiver<PoolExtMessages<'static>>,
         AbortOnDrop,
     ),
-    (),
+    Error,
 > {
     let socket = loop {
         match TcpStream::connect(address).await {
@@ -63,52 +65,41 @@ pub async fn connect_pool(
     let (mut receiver, mut sender, _, _) =
         Connection::new(socket, HandshakeRole::Initiator(initiator))
             .await
-            .expect("Failed to create connection");
+            .map_err(|e| {
+                error!("Failed to create connection");
+                Error::SV2Connection(e)
+            })?;
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
-    if mining_setup_connection(
+    match mining_setup_connection(
         &mut receiver,
         &mut sender,
         setup_connection_msg,
         timer.unwrap_or(DEFAULT_TIMER),
     )
     .await
-    .is_ok()
     {
-        let task_manager = TaskManager::initialize();
-        let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
-            Ok(Some(abortable)) => Ok(abortable),
-            // Aborter is None
-            Ok(None) => {
-                error!("Failed to get Aborter: Not found.");
-                return Err(());
-            }
-            // Failed to acquire lock
-            Err(_) => {
-                error!("Failed to acquire lock");
-                return Err(());
-            }
-        };
+        Ok(_) => {
+            let task_manager = TaskManager::initialize();
+            let abortable = task_manager
+                .safe_lock(|t| t.get_aborter())
+                .map_err(|_| Error::MiningPoolMutexCorrupted)?
+                .ok_or(Error::MiningPoolTaskManagerFailed)?;
 
-        let (send_to_down, recv_from_down) = tokio::sync::mpsc::channel(10);
-        let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
-        let relay_up_task = relay_up(recv_to_up, sender);
-        if TaskManager::add_sv2_relay_up(task_manager.clone(), relay_up_task)
-            .await
-            .is_err()
-        {
-            error!("Failed to add relay up task")
-        };
-        let relay_down_task = relay_down(receiver, send_to_down);
-        if TaskManager::add_sv2_relay_down(task_manager.clone(), relay_down_task)
-            .await
-            .is_err()
-        {
-            error!("Failed to add relay up task")
-        };
-        Ok((send_from_down, recv_from_down, abortable?))
-    } else {
-        Err(())
+            let (send_to_down, recv_from_down) = tokio::sync::mpsc::channel(10);
+            let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
+            let relay_up_task = relay_up(recv_to_up, sender);
+            TaskManager::add_sv2_relay_up(task_manager.clone(), relay_up_task)
+                .await
+                .map_err(|_| Error::MiningPoolTaskManagerFailed)?;
+
+            let relay_down_task = relay_down(receiver, send_to_down);
+            TaskManager::add_sv2_relay_down(task_manager.clone(), relay_down_task)
+                .await
+                .map_err(|_| Error::MiningPoolTaskManagerFailed)?;
+            Ok((send_from_down, recv_from_down, abortable))
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -123,7 +114,7 @@ pub fn relay_up(
                 let either_frame: EitherFrame = std_frame.into();
                 if send.send(either_frame).await.is_err() {
                     error!("Mining upstream failed");
-                    update_proxy_state(PoolState::Down);
+                    ProxyState::update_pool_state(PoolState::Down);
                     break;
                 };
             } else {
@@ -150,10 +141,11 @@ pub fn relay_down(
                         (extension, message_type, payload).try_into();
                     if let Ok(msg) = msg {
                         let msg = msg.into_static();
-                        if let Err(e) = send.send(msg).await {
-                            error!("Failed to send message {}", e);
-                            break;
-                            //panic!("Internal Mining downstream not available: {e}");
+                        if send.send(msg).await.is_err() {
+                            error!("Internal Mining downstream not available");
+
+                            // Update Proxy state to reflect Internal inconsistency
+                            ProxyState::update_inconsistency(Some(1));
                         }
                     } else {
                         error!("Mining Upstream send non Mining message. Disconnecting");
@@ -168,7 +160,7 @@ pub fn relay_down(
                 break;
             }
         }
-        update_proxy_state(PoolState::Down);
+        ProxyState::update_pool_state(PoolState::Down);
     });
     task.into()
 }
@@ -178,35 +170,42 @@ pub async fn mining_setup_connection(
     send: &mut Sender<EitherFrame>,
     setup_conection: SetupConnection<'static>,
     timer: std::time::Duration,
-) -> Result<SetupConnectionSuccess, ()> {
+) -> Result<SetupConnectionSuccess, Error> {
     let msg = PoolExtMessages::Common(CommonMessages::SetupConnection(setup_conection));
     let std_frame: StdFrame = match msg.try_into() {
         Ok(frame) => frame,
-        Err(_) => {
+        Err(e) => {
             error!("Failed to convert PoolExtMessages to StdFrame.");
-            return Err(());
+            return Err(Error::RolesSv2Logic(e));
         }
     };
     let either_frame: EitherFrame = std_frame.into();
     if send.send(either_frame).await.is_err() {
         error!("Failed to send Eitherframe");
-        return Err(());
+        return Err(Error::Unrecoverable);
     }
     if let Ok(Some(msg)) = tokio::time::timeout(timer, recv.recv()).await {
-        let mut msg: StdFrame = msg.try_into().map_err(|_| ())?;
-        let header = msg.get_header().ok_or(())?;
+        let mut msg: StdFrame = msg.try_into().map_err(Error::FramingSv2)?;
+        let header = msg.get_header().ok_or(Error::UnexpectedMessage)?;
         let message_type = header.msg_type();
         let payload = msg.payload();
         let msg: CommonMessages<'_> = match (message_type, payload).try_into() {
             Ok(message) => message,
-            Err(_) => return Err(()),
+            Err(e) => {
+                error!("Unexpected Message: {e}");
+                return Err(Error::UpstreamIncoming(e));
+            }
         };
         match msg {
             CommonMessages::SetupConnectionSuccess(s) => Ok(s),
-            _ => Err(()),
+            e => {
+                error!("Unexpected Message: {e:?}");
+                Err(Error::UnexpectedMessage)
+            }
         }
     } else {
-        Err(())
+        error!("Failed to setup connection: Timeout");
+        Err(Error::Timeout)
     }
 }
 
