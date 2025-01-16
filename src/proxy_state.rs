@@ -9,6 +9,7 @@ pub enum ProxyStateEnum {
     Pool(PoolState),
     Tp(TpState),
     Jd(JdState),
+    ShareAccounter(ShareAccounterState),
     InternalInconsistency(u32),
     Downstream(DownstreamState),
     Upstream(UpstreamState),
@@ -39,6 +40,13 @@ pub enum TranslatorState {
 /// Represents the state of the JD
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JdState {
+    Up,
+    Down,
+}
+
+/// Represents the state of the Share Accounter
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShareAccounterState {
     Up,
     Down,
 }
@@ -77,6 +85,7 @@ pub struct ProxyState {
     pub pool: PoolState,
     pub tp: TpState,
     pub jd: JdState,
+    pub share_accounter: ShareAccounterState,
     pub translator: TranslatorState,
     pub inconsistency: Option<u32>,
     pub downstream: DownstreamState,
@@ -91,6 +100,7 @@ impl ProxyState {
             pool: PoolState::Up,
             tp: TpState::Up,
             jd: JdState::Up,
+            share_accounter: ShareAccounterState::Up,
             translator: TranslatorState::Up,
             inconsistency: None,
             downstream: DownstreamState::Up,
@@ -118,6 +128,8 @@ impl ProxyState {
             ProxyStateEnum::Translator(self.translator)
         } else if self.jd == JdState::Down {
             ProxyStateEnum::Jd(JdState::Down)
+        } else if self.share_accounter == ShareAccounterState::Down {
+            ProxyStateEnum::ShareAccounter(ShareAccounterState::Down)
         } else {
             // If all states are Up, the proxy state is Up
             ProxyStateEnum::Up
@@ -168,6 +180,19 @@ impl ProxyState {
         if PROXY_STATE
             .safe_lock(|state| {
                 state.translator = translator_state;
+                state.update_proxy_state();
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+        }
+    }
+
+    /// Function to update ShareAccounter state
+    pub fn update_share_accounter_state(share_accounter_state: ShareAccounterState) {
+        if PROXY_STATE
+            .safe_lock(|state| {
+                state.share_accounter = share_accounter_state;
                 state.update_proxy_state();
             })
             .is_err()

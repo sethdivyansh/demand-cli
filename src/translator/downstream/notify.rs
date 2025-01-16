@@ -1,3 +1,4 @@
+use crate::proxy_state::{DownstreamState, DownstreamType, ProxyState};
 use crate::translator::downstream::SUBSCRIBE_TIMEOUT_SECS;
 use crate::translator::error::Error;
 
@@ -24,9 +25,16 @@ pub async fn start_notify(
             let timeout_timer = std::time::Instant::now();
             let mut first_sent = false;
             loop {
-                let is_a = downstream
-                    .safe_lock(|d| !d.authorized_names.is_empty())
-                    .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
+                let is_a = match downstream.safe_lock(|d| !d.authorized_names.is_empty()) {
+                    Ok(is_a) => is_a,
+                    Err(e) => {
+                        error!("{e}");
+                        ProxyState::update_downstream_state(DownstreamState::Down(
+                            DownstreamType::TranslatorDownstream,
+                        ));
+                        break;
+                    }
+                };
                 if is_a && !first_sent && last_notify.is_some() {
                     if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
                         error!("Failed to initailize difficulty managemant {e}")
@@ -36,28 +44,45 @@ pub async fn start_notify(
                         Some(sv1_mining_notify_msg) => sv1_mining_notify_msg,
                         None => {
                             error!("sv1_mining_notify_msg is None");
+                            ProxyState::update_downstream_state(DownstreamState::Down(
+                                DownstreamType::TranslatorDownstream,
+                            ));
                             break;
                         }
                     };
                     let message: json_rpc::Message = sv1_mining_notify_msg.into();
                     Downstream::send_message_downstream(downstream.clone(), message).await;
-                    downstream
+                    if downstream
                         .clone()
                         .safe_lock(|s| {
                             s.first_job_received = true;
                         })
-                        .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
+                        .is_err()
+                    {
+                        error!("Translator Downstream Mutex Poisoned");
+                        ProxyState::update_downstream_state(DownstreamState::Down(
+                            DownstreamType::TranslatorDownstream,
+                        ));
+                        break;
+                    }
                     first_sent = true;
                 } else if is_a && last_notify.is_some() {
                     if let Err(e) = start_update(task_manager, downstream.clone()).await {
-                        warn!("Translator impossible to start update task");
-                        return Err(e);
+                        warn!("Translator impossible to start update task: {e}");
+                        break;
                     };
 
                     while let Ok(sv1_mining_notify_msg) = rx_sv1_notify.recv().await {
-                        downstream
+                        if downstream
                             .safe_lock(|d| d.last_notify = Some(sv1_mining_notify_msg.clone()))
-                            .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
+                            .is_err()
+                        {
+                            error!("Translator Downstream Mutex Poisoned");
+                            ProxyState::update_downstream_state(DownstreamState::Down(
+                                DownstreamType::TranslatorDownstream,
+                            ));
+                            break;
+                        }
 
                         let message: json_rpc::Message = sv1_mining_notify_msg.into();
                         Downstream::send_message_downstream(downstream.clone(), message).await;
@@ -82,7 +107,6 @@ pub async fn start_notify(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host
             );
-            Ok::<(), Error<'static>>(())
         })
     };
     TaskManager::add_notify(task_manager, handle.into())

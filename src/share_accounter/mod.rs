@@ -11,7 +11,11 @@ use parser::{PoolExtMessages, ShareAccountingMessages};
 use roles_logic_sv2::{mining_sv2::SubmitSharesSuccess, parsers::Mining};
 use task_manager::TaskManager;
 
-use crate::{proxy_state::ProxyState, shared::utils::AbortOnDrop, PoolState};
+use crate::{
+    proxy_state::{ProxyState, ShareAccounterState},
+    shared::utils::AbortOnDrop,
+    PoolState,
+};
 
 pub async fn start(
     receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
@@ -98,7 +102,8 @@ fn relay_down(
                             new_shares_sum: 1,
                         });
                         if let Err(e) = sender.send(success).await {
-                            error!("{e:?}"); //? check should update proxy or not
+                            error!("{e:?}");
+                            ProxyState::update_share_accounter_state(ShareAccounterState::Down);
                             break;
                         }
                     };
@@ -106,14 +111,14 @@ fn relay_down(
                 PoolExtMessages::Mining(msg) => {
                     if let Err(e) = sender.send(msg).await {
                         error!("{e}");
+                        ProxyState::update_share_accounter_state(ShareAccounterState::Down);
                         break;
                     }
                 }
                 _ => {
-                    //panic!("Pool send unexpected message on mining connection")
-                    //Instead of panicking we set the global pool state to down
+                    error!("Pool send unexpected message on mining connection");
                     ProxyState::update_pool_state(PoolState::Down);
-                    return;
+                    break;
                 }
             }
         }

@@ -160,6 +160,7 @@ pub fn relay_down(
                 break;
             }
         }
+        error!("Failed to receive msg from Pool");
         ProxyState::update_pool_state(PoolState::Down);
     });
     task.into()

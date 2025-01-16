@@ -1,5 +1,8 @@
-use crate::translator::{
-    error::Error, proxy::Bridge, upstream::diff_management::UpstreamDifficultyConfig,
+use crate::{
+    proxy_state::{DownstreamState, DownstreamType, ProxyState},
+    translator::{
+        error::Error, proxy::Bridge, upstream::diff_management::UpstreamDifficultyConfig,
+    },
 };
 
 use super::{downstream::Downstream, task_manager::TaskManager, DownstreamMessages};
@@ -35,9 +38,14 @@ pub async fn start_accept_connection(
                     error!("Bridge not ready");
                     break;
                 };
-                let open_sv1_downstream = bridge
-                    .safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate))
-                    .map_err(|_| Error::BridgeMutexPoisoned)?;
+                let open_sv1_downstream =
+                    match bridge.safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate)) {
+                        Ok(sv1_downstream) => sv1_downstream,
+                        Err(e) => {
+                            error!("{e}");
+                            break;
+                        }
+                    };
 
                 match open_sv1_downstream {
                     Ok(opened) => {
@@ -62,11 +70,13 @@ pub async fn start_accept_connection(
                     }
                     Err(e) => {
                         error!("{e:?}");
-                        return Err(e);
+                        ProxyState::update_downstream_state(DownstreamState::Down(
+                            DownstreamType::TranslatorDownstream,
+                        ));
+                        break;
                     }
                 }
             }
-            Ok(())
         })
     };
     TaskManager::add_accept_connection(task_manager, handle.into())

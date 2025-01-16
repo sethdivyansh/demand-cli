@@ -1,5 +1,5 @@
 use crate::proxy_state::{
-    DownstreamState, DownstreamType, ProxyState, UpstreamState, UpstreamType,
+    DownstreamState, DownstreamType, ProxyState, TpState, UpstreamState, UpstreamType,
 };
 use crate::{jd_client::error::Error, jd_client::error::ProxyResult, shared::utils::AbortOnDrop};
 
@@ -22,7 +22,7 @@ use roles_logic_sv2::{
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 use tokio::task;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use std::collections::VecDeque;
 
@@ -232,9 +232,9 @@ impl Upstream {
                         Some(msg) => msg,
                         None => {
                             error!("Upstream down");
-                            //? check
                             // Update the proxy state to reflect the Tp is down
-                            return;
+                            ProxyState::update_tp_state(TpState::Down);
+                            break;
                         }
                     };
 
@@ -260,7 +260,7 @@ impl Upstream {
                                 ProxyState::update_downstream_state(DownstreamState::Down(
                                     DownstreamType::JdClientMiningDownstream,
                                 ));
-                                return;
+                                break;
                             };
                         }
                         Ok(SendTo::None(_)) => (),
@@ -270,6 +270,7 @@ impl Upstream {
                             ProxyState::update_upstream_state(UpstreamState::Down(
                                 UpstreamType::JDCMiningUpstream,
                             ));
+                            break;
                         }
                     }
                 }
@@ -302,16 +303,11 @@ impl Upstream {
 
     pub async fn get_job_id(self_: &Arc<Mutex<Self>>, template_id: u64) -> Result<u32, Error> {
         loop {
-            match self_
+            if let Some(id) = self_
                 .safe_lock(|s| s.template_to_job_id.get_job_id(template_id))
-                .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
+                .map_err(|_| Error::JdClientDownstreamMutexCorrupted)?
             {
-                Some(id) => return Ok(id),
-                None => {
-                    //? check
-                    // job_id not found
-                    debug!("Job ID not found for template_id: {}", template_id);
-                }
+                return Ok(id);
             }
             tokio::task::yield_now().await;
         }

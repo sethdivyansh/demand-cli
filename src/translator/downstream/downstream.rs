@@ -189,6 +189,10 @@ impl Downstream {
         .await
         {
             error!("Translator downstream failed to accept: {e}");
+            ProxyState::update_downstream_state(DownstreamState::Down(
+                DownstreamType::TranslatorDownstream,
+            ));
+            return Err(e);
         };
         Ok(abortable)
     }
@@ -252,7 +256,8 @@ impl Downstream {
     pub(super) async fn send_message_upstream(self_: &Arc<Mutex<Self>>, msg: DownstreamMessages) {
         let sender = match self_.safe_lock(|s| s.tx_sv1_bridge.clone()) {
             Ok(sender) => sender,
-            Err(_) => {
+            Err(e) => {
+                error!("{e}");
                 // Poisoned mutex
                 ProxyState::update_downstream_state(DownstreamState::Down(
                     DownstreamType::TranslatorDownstream,
@@ -261,6 +266,7 @@ impl Downstream {
             }
         };
         if sender.send(msg).await.is_err() {
+            error!("Translator downstream failed to send message");
             ProxyState::update_downstream_state(DownstreamState::Down(
                 DownstreamType::TranslatorDownstream,
             ));

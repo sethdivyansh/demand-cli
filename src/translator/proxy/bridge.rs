@@ -193,7 +193,8 @@ impl Bridge {
                     Some(msg) => msg,
                     None => {
                         error!("Failed to receive message from downstream");
-                        break; //? check break or return?
+                        ProxyState::update_translator_state(TranslatorState::Down);
+                        break;
                     }
                 };
 
@@ -209,7 +210,7 @@ impl Bridge {
                             Self::handle_update_downstream_target(self_.clone(), new_target)
                         {
                             error!("Failed to handle SetDownstreamTarget: {e}");
-                            //? check: should restart proxy?
+                            ProxyState::update_translator_state(TranslatorState::Down);
                             break;
                         };
                     }
@@ -430,6 +431,7 @@ impl Bridge {
                         Some(set_new_prev_hash) => set_new_prev_hash,
                         None => {
                             error!("Failed to receive SetNewPrevHash");
+                            ProxyState::update_translator_state(TranslatorState::Down);
                             break;
                         }
                     };
@@ -540,6 +542,7 @@ impl Bridge {
                         Some(sv2_new_extended_mining_job) => sv2_new_extended_mining_job,
                         None => {
                             error!("Failed to receive NewExtendedMiningJob from upstream");
+                            ProxyState::update_translator_state(TranslatorState::Down);
                             break;
                         }
                     };

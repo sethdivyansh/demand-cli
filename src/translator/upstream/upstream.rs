@@ -32,7 +32,10 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use super::task_manager::TaskManager;
-use crate::shared::utils::AbortOnDrop;
+use crate::{
+    proxy_state::{ProxyState, UpstreamState, UpstreamType},
+    shared::utils::AbortOnDrop,
+};
 use bitcoin::BlockHash;
 
 pub static IS_NEW_JOB_HANDLED: AtomicBool = AtomicBool::new(true);
@@ -291,7 +294,7 @@ impl Upstream {
                                                 error!(
                                                     "Failed to create a valid extended extranonce from {:?} {:?} {:?} {:?}: {:?}",
                                                     extranonce_prefix, range_0, range_1, range_2, e
-                                                );
+                                                ); ProxyState::update_upstream_state(UpstreamState::Down(UpstreamType::TranslatorUpstream));
                                                 break;
                                             }
                                         };
