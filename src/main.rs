@@ -35,8 +35,8 @@ const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 1_000_000_000_000.0;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
 const POOL_ADDRESS: &str = "mining.dmnd.work:2000";
 //const POOL_ADDRESS: &str = "0.0.0.0:20000";
-const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
-//const AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
+//const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
+const AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 //const TP_ADDRESS: &str = "127.0.0.1:8442";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
