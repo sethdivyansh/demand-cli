@@ -227,7 +227,7 @@ async fn monitor(
                 .unwrap();
             if is_proxy_down.0 {
                 error!(
-                    "{:?} is DOWN. Reinitializing proxy...",
+                    "Status: {:?}. Reinitializing proxy...",
                     is_proxy_down.1.unwrap_or("Proxy".to_string())
                 );
                 return Ok(Reconnect::NoUpstream);
