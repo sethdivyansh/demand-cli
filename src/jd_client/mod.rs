@@ -13,7 +13,7 @@ use mining_downstream::DownstreamMiningNode;
 use std::sync::atomic::AtomicBool;
 use task_manager::TaskManager;
 use template_receiver::TemplateRx;
-use tracing::error;
+use tracing::{error, info};
 
 /// Is used by the template receiver and the downstream. When a NewTemplate is received the context
 /// that is running the template receiver set this value to false and then the message is sent to
@@ -38,10 +38,7 @@ use tracing::error;
 ///    between all the contexts is not necessary.
 pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 
-use crate::{
-    jd_client::error::Error,
-    proxy_state::{DownstreamState, DownstreamType, ProxyState},
-};
+use crate::proxy_state::{DownstreamState, DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -58,19 +55,24 @@ pub async fn start(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-) -> Result<AbortOnDrop, Error> {
+) -> Option<AbortOnDrop> {
     initialize_jd(receiver, sender, up_receiver, up_sender).await
 }
+
 async fn initialize_jd(
     receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-) -> Result<AbortOnDrop, Error> {
+) -> Option<AbortOnDrop> {
     let task_manager = TaskManager::initialize();
-    let abortable = task_manager
-        .safe_lock(|t| t.get_aborter().ok_or(Error::TaskManagerFailed))
-        .map_err(|_| Error::JdClientMutexCorrupted)??;
+    let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
+        Ok(abortable) => abortable?,
+        Err(e) => {
+            error!("Jdc task manager mutex corrupt: {e}");
+            return None;
+        }
+    };
     let test_only_do_not_send_solution_to_tp = false;
 
     // When Downstream receive a share that meets bitcoin target it transformit in a
@@ -78,12 +80,27 @@ async fn initialize_jd(
     let (send_solution, recv_solution) = tokio::sync::mpsc::channel(10);
 
     // Instantiate a new `Upstream` (SV2 Pool)
-    let upstream = mining_upstream::Upstream::new(crate::MIN_EXTRANONCE_SIZE, up_sender).await?;
+    let upstream = match mining_upstream::Upstream::new(crate::MIN_EXTRANONCE_SIZE, up_sender).await
+    {
+        Ok(upstream) => upstream,
+        Err(e) => {
+            error!("Failed to instantiate new Upstream: {e}");
+            drop(abortable); // drop all tasks initailzed upto this point
+            return None;
+        }
+    };
 
     // Initialize JD part
-    let tp_address = crate::TP_ADDRESS
-        .as_ref()
-        .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present");
+    let tp_address = match crate::TP_ADDRESS.safe_lock(|tp| tp.clone()) {
+        Ok(tp_address) => tp_address
+            .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present"),
+        Err(e) => {
+            error!("TP_ADDRESS mutex corrupted: {e}");
+            drop(abortable); // drop all tasks initailzed upto this point
+            return None;
+        }
+    };
+
     let mut parts = tp_address.split(':');
     let ip_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").to_string();
     let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
@@ -91,19 +108,27 @@ async fn initialize_jd(
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
     let address = crate::POOL_ADDRESS
         .to_socket_addrs()
-        .map_err(Error::Io)?
-        .next()
-        .ok_or(Error::Unrecoverable)?;
+        .expect("The passed Pool Address is not valid")
+        .next()?;
 
     let (jd, jd_abortable) =
         match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone()).await {
             Ok(c) => c,
-            Err(e) => return Err(e),
+            Err(e) => {
+                error!("Failed to intialize Jd: {e}");
+                drop(abortable); // drop all tasks initailzed upto this point
+                return None;
+            }
         };
 
-    TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
+    if TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
         .await
-        .map_err(|_| Error::TaskManagerFailed)?;
+        .is_err()
+    {
+        error!("{}", error::Error::TaskManagerFailed);
+        drop(abortable); // drop all tasks initailzed upto this point
+        return None;
+    };
 
     let donwstream = Arc::new(Mutex::new(DownstreamMiningNode::new(
         sender,
@@ -116,43 +141,109 @@ async fn initialize_jd(
     let downstream_abortable = match DownstreamMiningNode::start(donwstream.clone(), receiver).await
     {
         Ok(abortable) => abortable,
-        Err(_) => {
+        Err(e) => {
+            error!("{e}");
             ProxyState::update_downstream_state(DownstreamState::Down(
                 DownstreamType::JdClientMiningDownstream,
             ));
-            return Err(Error::Unrecoverable);
+            return None;
         }
     };
-    TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable)
+    if TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable)
         .await
-        .map_err(|_| Error::TaskManagerFailed)?;
-    upstream
+        .is_err()
+    {
+        error!("{}", error::Error::TaskManagerFailed);
+        drop(abortable); // drop all tasks initailzed upto this point
+        return None;
+    };
+    if upstream
         .safe_lock(|u| u.downstream = Some(donwstream.clone()))
-        .map_err(|_| Error::JdClientMutexCorrupted)?;
+        .is_err()
+    {
+        error!("Upstream mutex failed");
+        drop(abortable); // drop all tasks initailzed upto this point
+        return None;
+    };
 
     // Start receiving messages from the SV2 Upstream role
     let upstream_abortable =
-        mining_upstream::Upstream::parse_incoming(upstream.clone(), up_receiver).await?;
-    TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable)
+        match mining_upstream::Upstream::parse_incoming(upstream.clone(), up_receiver).await {
+            Ok(abortable) => abortable,
+            Err(e) => {
+                error!("Failed to get jdc upstream abortable: {e}");
+                drop(abortable); // drop all tasks initailzed upto this point
+                return None;
+            }
+        };
+    if TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable)
         .await
-        .map_err(|_| Error::TaskManagerFailed)?;
-    let ip = IpAddr::from_str(ip_tp.as_str()).map_err(|_| Error::Unrecoverable)?; //? check
-    let tp_abortable = TemplateRx::connect(
+        .is_err()
+    {
+        error!("{}", error::Error::TaskManagerFailed);
+        drop(abortable); // drop all tasks initailzed upto this point
+        return None;
+    };
+    let ip = IpAddr::from_str(ip_tp.as_str())
+        .expect("Infallable Operation: Failed tp can always be converted into IpAddr");
+    let tp_abortable = match TemplateRx::connect(
         SocketAddr::new(ip, port_tp),
         recv_solution,
         Some(jd.clone()),
-        donwstream,
+        donwstream.clone(),
         vec![],
         None,
         test_only_do_not_send_solution_to_tp,
     )
     .await
-    .map_err(|e| {
-        error!("{e}");
-        e
-    })?; //?check
-    TaskManager::add_template_receiver_task(task_manager, tp_abortable)
+    {
+        Ok(abortable) => abortable,
+        Err(_) => {
+            info!("Dropping jd abortable");
+            drop(abortable); // drop all tasks initailzed upto this point
+                             //temporaily set TP_ADDRESS to None so that proxy can restart without it.
+                             // that means we will start mining without jd
+            if crate::TP_ADDRESS.safe_lock(|tp| *tp = None).is_err() {
+                error!("TP_ADDRESS mutex corrupt");
+                return None;
+            };
+            // spawn a task to keep trying the connection
+            tokio::spawn(retry_connection(tp_address));
+            return None;
+        }
+    };
+
+    if TaskManager::add_template_receiver_task(task_manager, tp_abortable)
         .await
-        .map_err(|_| Error::TaskManagerFailed)?;
-    Ok(abortable)
+        .is_err()
+    {
+        error!("{}", error::Error::TaskManagerFailed);
+        drop(abortable); // drop all tasks initailzed upto this point
+        return None;
+    };
+    Some(abortable)
+}
+
+// // Used when tp is down or connection was unsuccessful to retry connection.
+async fn retry_connection(address: String) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5)); // Retry every 5 seconds
+    loop {
+        // info!("Retrying connection....");           //might bloat log
+        interval.tick().await;
+        if tokio::net::TcpStream::connect(address.clone())
+            .await
+            .is_ok()
+        {
+            info!("Successfully reconnected to TP: Restarting Proxy...");
+            if crate::TP_ADDRESS
+                .safe_lock(|tp| *tp = Some(address))
+                .is_err()
+            {
+                error!("TP_ADDRESS Mutex failed");
+                return;
+            };
+            ProxyState::update_tp_state(TpState::Down);
+            return;
+        }
+    }
 }

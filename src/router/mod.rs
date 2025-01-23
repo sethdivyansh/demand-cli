@@ -332,7 +332,10 @@ impl PoolLatency {
 
         match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(address)).await {
             Ok(Ok(stream)) => {
-                if let Some(_tp_addr) = crate::TP_ADDRESS.as_ref() {
+                let tp = crate::TP_ADDRESS
+                    .safe_lock(|tp| tp.clone())
+                    .map_err(|_| error!(" TP_ADDRESS Mutex Corrupted"))?;
+                if let Some(_tp_addr) = tp {
                     let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
                         // Safe expect Key is a constant and must be right
                         .expect("Unable to create initialtor");

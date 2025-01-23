@@ -249,7 +249,8 @@ impl JobDeclarator {
                 .into_iter()
                 .map(|item| {
                     let item_vec = item.to_vec();
-                    U256::from_vec_(item_vec).unwrap()
+                    U256::from_vec_(item_vec)
+                        .expect("Internal Error: Transactions not in the expected format ")
                 })
                 .collect();
 
