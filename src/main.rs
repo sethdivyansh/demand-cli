@@ -2,6 +2,7 @@
 use jemallocator::Jemalloc;
 use roles_logic_sv2::utils::Mutex;
 use router::Router;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -53,7 +54,15 @@ lazy_static! {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    //Disable noise_connection error (for now) because:
+    // 1. It produce logs that are not very user friendly and also bloth the logs
+    // 2. The errors resulting from noise_connection are handled. E.g if unrecoverable error from noise connection occurs during Pool connection: We either retry connecting immediatley or we update Proxy state to Pool Down
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::EnvFilter::new(
+            "info,demand_sv2_connection::noise_connection_tokio=off",
+        ))
+        .init();
     std::env::var("TOKEN").expect("Missing TOKEN environment variable");
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
     let address = POOL_ADDRESS
@@ -256,7 +265,7 @@ async fn monitor(
             Ok(is_proxy_down) => {
                 if is_proxy_down.0 {
                     error!(
-                        "{:?} is DOWN. Reinitializing proxy...",
+                        "Status: {:?}. Reinitializing proxy...",
                         is_proxy_down.1.unwrap_or_else(|| "Proxy".to_string())
                     );
                     drop(abort_handles); // Drop all abort handles
