@@ -349,7 +349,7 @@ impl Upstream {
                         }
                     }
                 }
-                error!("Failed to receive message In translator upstream parse incoming");
+                error!("Failed to receive message");
                 Err(Error::Unrecoverable)
             })
         };
@@ -391,9 +391,7 @@ impl Upstream {
                     let mut sv2_submit: SubmitSharesExtended = match rx_submit.recv().await {
                         Some(msg) => msg,
                         None => {
-                            error!(
-                                "Failed to receive message in translator upstream handle submit"
-                            );
+                            error!("Failed to receive SubmitShare message");
                             return Err(Error::Unrecoverable);
                         }
                     };
