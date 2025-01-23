@@ -1,4 +1,4 @@
-use tracing::error;
+use tracing::{error, info};
 
 use crate::PROXY_STATE;
 
@@ -138,6 +138,7 @@ impl ProxyState {
 
     ///  Function to update pool state
     pub fn update_pool_state(pool_state: PoolState) {
+        info!("Updating PoolState state to {:?}", pool_state);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.pool = pool_state;
@@ -151,6 +152,7 @@ impl ProxyState {
 
     /// Function to update TP state
     pub fn update_tp_state(tp_state: TpState) {
+        info!("Updating TpState state to {:?}", tp_state);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.tp = tp_state;
@@ -164,6 +166,7 @@ impl ProxyState {
 
     /// Function to update Jd state
     pub fn update_jd_state(jd_state: JdState) {
+        info!("Updating JdState state to {:?}", jd_state);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.jd = jd_state;
@@ -177,6 +180,7 @@ impl ProxyState {
 
     /// Function to update Translator state
     pub fn update_translator_state(translator_state: TranslatorState) {
+        info!("Updating Translator state to {:?}", translator_state);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.translator = translator_state;
@@ -190,6 +194,10 @@ impl ProxyState {
 
     /// Function to update ShareAccounter state
     pub fn update_share_accounter_state(share_accounter_state: ShareAccounterState) {
+        info!(
+            "Updating ShareAccounterState state to {:?}",
+            share_accounter_state
+        );
         if PROXY_STATE
             .safe_lock(|state| {
                 state.share_accounter = share_accounter_state;
@@ -203,6 +211,7 @@ impl ProxyState {
 
     /// Function to update inconsistency
     pub fn update_inconsistency(code: Option<u32>) {
+        info!("Updating Internal Inconsistency state to {:?}", code);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.inconsistency = code;
@@ -216,6 +225,7 @@ impl ProxyState {
 
     /// Function to update a downstream state
     pub fn update_downstream_state(downstream_state: DownstreamState) {
+        info!("Updating Downstream state to {:?}", downstream_state);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.downstream = downstream_state;
@@ -229,6 +239,7 @@ impl ProxyState {
 
     /// Function to update a downstream state
     pub fn update_upstream_state(upstream_state: UpstreamState) {
+        info!("Updating Upstream state to {:?}", upstream_state);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.upstream = upstream_state;
@@ -244,6 +255,14 @@ impl ProxyState {
     pub fn update_proxy_state_up() {
         if PROXY_STATE
             .safe_lock(|state| {
+                state.pool = PoolState::Up;
+                state.jd = JdState::Up;
+                state.translator = TranslatorState::Up;
+                state.tp = TpState::Up;
+                state.share_accounter = ShareAccounterState::Up;
+                state.upstream = UpstreamState::Up;
+                state.downstream = DownstreamState::Up;
+                state.inconsistency = None;
                 state.proxy_state = ProxyStateEnum::Up;
                 state.update_proxy_state();
             })

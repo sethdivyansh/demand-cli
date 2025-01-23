@@ -169,9 +169,14 @@ impl Router {
         .await)
             .is_err()
         {
+            error!(
+                "Failed to get mining setup latencies for: {:?}",
+                pool_address
+            );
             return Err(());
         }
         if (PoolLatency::get_jd_latencies(&mut pool, auth_pub_key).await).is_err() {
+            error!("Failed to get jd setup latencies for: {:?}", pool_address);
             return Err(());
         }
 
@@ -238,12 +243,7 @@ impl PoolLatency {
     ) -> Result<(), ()> {
         // Set open_sv2_mining_connection latency
         let open_sv2_mining_connection_timer = Instant::now();
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(crate::POOL_ADDRESS),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(self.pool)).await {
             Ok(Ok(stream)) => {
                 self.open_sv2_mining_connection = Some(open_sv2_mining_connection_timer.elapsed());
 
