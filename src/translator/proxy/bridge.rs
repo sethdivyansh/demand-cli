@@ -15,14 +15,14 @@ use tokio::sync::broadcast;
 use super::{
     super::{
         downstream::{DownstreamMessages, SetDownstreamTarget, SubmitShareWithChannelId},
-        error::{
-            Error::{self, PoisonLock},
-            ProxyResult,
-        },
+        error::{Error, ProxyResult},
     },
     task_manager::TaskManager,
 };
-use crate::shared::utils::AbortOnDrop;
+use crate::{
+    proxy_state::{ProxyState, TranslatorState, UpstreamState, UpstreamType},
+    shared::utils::AbortOnDrop,
+};
 use roles_logic_sv2::{channel_logic::channel_factory::OnNewShare, Error as RolesLogicError};
 use tracing::{debug, error, info};
 
@@ -57,11 +57,16 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub async fn ready(self_: &Arc<Mutex<Self>>) {
-        while self_.safe_lock(|b| b.last_notify.is_none()).unwrap() {
+    pub async fn ready(self_: &Arc<Mutex<Self>>) -> Result<(), Error> {
+        while self_
+            .safe_lock(|b| b.last_notify.is_none())
+            .map_err(|_| Error::BridgeMutexPoisoned)?
+        {
             tokio::task::yield_now().await;
         }
+        Ok(())
     }
+
     #[allow(clippy::too_many_arguments)]
     /// Instantiate a new `Bridge`.
     pub fn new(
@@ -70,14 +75,15 @@ impl Bridge {
         extranonces: ExtendedExtranonce,
         target: Arc<Mutex<Vec<u8>>>,
         up_id: u32,
-    ) -> Arc<Mutex<Self>> {
+    ) -> Result<Arc<Mutex<Self>>, Error<'static>> {
         info!("Creating new bridge for up_id {}:", up_id);
         let ids = Arc::new(Mutex::new(GroupId::new()));
         let share_per_min = 1.0;
-        let upstream_target: [u8; 32] =
-            target.safe_lock(|t| t.clone()).unwrap().try_into().unwrap();
+        let upstream_target: [u8; 32] =  target.safe_lock(|t| {
+    t.clone().try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into [u8; 32]")
+}).map_err(|e| Error::TargetError(RolesLogicError::PoisonLock(e.to_string())))?;
         let upstream_target: Target = upstream_target.into();
-        Arc::new(Mutex::new(Self {
+        Ok(Arc::new(Mutex::new(Self {
             tx_sv2_submit_shares_ext,
             tx_sv1_notify,
             last_notify: None,
@@ -94,7 +100,7 @@ impl Bridge {
             last_p_hash: None,
             target,
             last_job_id: 0,
-        }))
+        })))
     }
 
     #[allow(clippy::result_large_err)]
@@ -113,7 +119,9 @@ impl Bridge {
                     let extranonce2_len = success.extranonce_size;
                     self.target
                         .safe_lock(|t| *t = success.target.to_vec())
-                        .map_err(|_e| PoisonLock)?;
+                        .map_err(|e| {
+                            Error::TargetError(roles_logic_sv2::Error::PoisonLock(e.to_string()))
+                        })?;
                     Ok(OpenSv1Downstream {
                         channel_id: success.channel_id,
                         last_notify: self.last_notify.clone(),
@@ -143,29 +151,33 @@ impl Bridge {
         rx_sv2_set_new_prev_hash: tokio::sync::mpsc::Receiver<SetNewPrevHash<'static>>,
         rx_sv2_new_ext_mining_job: tokio::sync::mpsc::Receiver<NewExtendedMiningJob<'static>>,
         rx_sv1_downstream: tokio::sync::mpsc::Receiver<DownstreamMessages>,
-    ) -> Result<AbortOnDrop, ()> {
+    ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
             .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+            .map_err(|_| Error::BridgeTaskManagerMutexPoisoned)?
+            .ok_or(Error::BridgeTaskManagerFailed)?;
+
         let new_prev_hash_handler =
-            Self::handle_new_prev_hash(self_.clone(), rx_sv2_set_new_prev_hash);
+            Self::handle_new_prev_hash(self_.clone(), rx_sv2_set_new_prev_hash)?;
         let new_ext_m_job_handler =
-            Self::handle_new_extended_mining_job(self_.clone(), rx_sv2_new_ext_mining_job);
+            Self::handle_new_extended_mining_job(self_.clone(), rx_sv2_new_ext_mining_job)?;
         let downs_message_handler = Self::handle_downstream_messages(self_, rx_sv1_downstream);
         TaskManager::add_handle_new_prev_hash(task_manager.clone(), new_prev_hash_handler.into())
-            .await?;
+            .await
+            .map_err(|_| Error::BridgeTaskManagerFailed)?;
         TaskManager::add_handle_new_extended_mining_job(
             task_manager.clone(),
             new_ext_m_job_handler.into(),
         )
-        .await?;
+        .await
+        .map_err(|_| Error::BridgeTaskManagerFailed)?;
         TaskManager::add_handle_downstream_messages(
             task_manager.clone(),
             downs_message_handler.into(),
         )
-        .await?;
+        .await
+        .map_err(|_| Error::BridgeTaskManagerFailed)?;
         Ok(abortable)
     }
 
@@ -177,16 +189,31 @@ impl Bridge {
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
             loop {
-                let msg = rx_sv1_downstream.recv().await.unwrap();
+                let msg = match rx_sv1_downstream.recv().await {
+                    Some(msg) => msg,
+                    None => {
+                        error!("Failed to receive message from downstream");
+                        ProxyState::update_translator_state(TranslatorState::Down);
+                        break;
+                    }
+                };
 
                 match msg {
                     DownstreamMessages::SubmitShares(share) => {
-                        Self::handle_submit_shares(self_.clone(), share)
-                            .await
-                            .unwrap();
+                        if let Err(e) = Self::handle_submit_shares(self_.clone(), share).await {
+                            error!("Failed to handle SubmitShareWithChannelId: {e}");
+                            ProxyState::update_translator_state(TranslatorState::Down);
+                            break;
+                        }
                     }
                     DownstreamMessages::SetDownstreamTarget(new_target) => {
-                        Self::handle_update_downstream_target(self_.clone(), new_target).unwrap();
+                        if let Err(e) =
+                            Self::handle_update_downstream_target(self_.clone(), new_target)
+                        {
+                            error!("Failed to handle SetDownstreamTarget: {e}");
+                            ProxyState::update_translator_state(TranslatorState::Down);
+                            break;
+                        };
                     }
                 };
             }
@@ -203,7 +230,7 @@ impl Bridge {
                 b.channel_factory
                     .update_target_for_channel(new_target.channel_id, new_target.new_target);
             })
-            .map_err(|_| PoisonLock)?;
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
         Ok(())
     }
     /// receives a `SubmitShareWithChannelId` and validates the shares and sends to `Upstream` if
@@ -216,22 +243,30 @@ impl Bridge {
         info!("Bridge recv share for channel {:?}", channel_id);
         let (tx_sv2_submit_shares_ext, target_mutex) = self_
             .safe_lock(|s| (s.tx_sv2_submit_shares_ext.clone(), s.target.clone()))
-            .map_err(|_| PoisonLock)?;
-        let upstream_target: [u8; 32] = target_mutex
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
+        let upstream_target: [u8; 32] =  target_mutex
             .safe_lock(|t| t.clone())
-            .map_err(|_| PoisonLock)?
+            .map_err(|_| Error::BridgeMutexPoisoned)?
             .try_into()
-            .unwrap();
+            .expect("Internal error: this operation can not fail because the Vec<U8> can always be converted into Inner");
         let mut upstream_target: Target = upstream_target.into();
         let res = self_
             .safe_lock(|s| {
                 s.channel_factory.set_target(&mut upstream_target);
-                let sv2_submit = s
-                    .translate_submit(share.channel_id, share.share, share.version_rolling_mask)
-                    .unwrap();
-                s.channel_factory.on_submit_shares_extended(sv2_submit)
+                let sv2_submit = match s.translate_submit(
+                    share.channel_id,
+                    share.share,
+                    share.version_rolling_mask,
+                ) {
+                    Ok(submit_shares_extended) => submit_shares_extended,
+                    Err(e) => {
+                        error!("Failed to Translates SV1 mining.submit message to SV2 SubmitSharesExtended message");
+                        return Err(e); // Error will be handled by the caller
+                    }
+                };
+                Ok(s.channel_factory.on_submit_shares_extended(sv2_submit))
             })
-            .map_err(|_| PoisonLock);
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
 
         match res {
             Ok(Ok(OnNewShare::SendErrorDownstream(e))) => {
@@ -244,7 +279,10 @@ impl Bridge {
                 info!("SHARE MEETS UPSTREAM TARGET channel id: {}", channel_id);
                 match share {
                     Share::Extended(share) => {
-                        tx_sv2_submit_shares_ext.send(share).await.unwrap();
+                        if tx_sv2_submit_shares_ext.send(share).await.is_err() {
+                            error!("Failed to send SubmitShareExtended downstream");
+                            return Err(Error::AsyncChannelError);
+                        }
                     }
                     // We are in an extended channel shares are extended
                     Share::Standard(_) => unreachable!(),
@@ -259,11 +297,11 @@ impl Bridge {
             Ok(Ok(OnNewShare::ShareMeetBitcoinTarget(..))) => unreachable!(),
             Ok(Err(e)) => {
                 error!("{}", e);
+                return Err(Error::RolesSv2Logic(e));
             }
             Err(e) => {
-                // TODO was shutdown
                 error!("{}", e);
-                todo!()
+                return Err(e);
             }
         }
         Ok(())
@@ -284,7 +322,7 @@ impl Bridge {
         let last_version = self
             .channel_factory
             .last_valid_job_version()
-            .ok_or(Error::RolesSv2Logic(RolesLogicError::NoValidJob))?;
+            .ok_or(Error::Unrecoverable)?;
         let version = match (sv1_submit.version_bits, version_rolling_mask) {
             // regarding version masking see https://github.com/slushpool/stratumprotocol/blob/master/stratum-extensions.mediawiki#changes-in-request-miningsubmit
             (Some(vb), Some(mask)) => (last_version & !mask.0) | (vb.0 & mask.0),
@@ -297,11 +335,11 @@ impl Bridge {
             channel_id,
             // I put 0 below cause sequence_number is not what should be TODO
             sequence_number: 0,
-            job_id: sv1_submit.job_id.parse::<u32>().unwrap(),
+            job_id: sv1_submit.job_id.parse::<u32>().expect("Internal error: this operation can not fail because job_id can always be converted into U32"),
             nonce: sv1_submit.nonce.0,
             ntime: sv1_submit.time.0,
             version,
-            extranonce: extranonce2.try_into().unwrap(),
+            extranonce: extranonce2.try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into Inner"),
         })
     }
 
@@ -317,15 +355,14 @@ impl Bridge {
         }
         self_
             .safe_lock(|s| s.last_p_hash = Some(sv2_set_new_prev_hash.clone()))
-            .map_err(|_| PoisonLock)?;
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
 
-        let on_new_prev_hash_res = self_
+        self_
             .safe_lock(|s| {
                 s.channel_factory
                     .on_new_prev_hash(sv2_set_new_prev_hash.clone())
             })
-            .map_err(|_| PoisonLock)?;
-        on_new_prev_hash_res.unwrap();
+            .map_err(|_| Error::BridgeMutexPoisoned)??;
 
         let mut future_jobs = self_
             .safe_lock(|s| {
@@ -333,11 +370,11 @@ impl Bridge {
                 s.future_jobs = vec![];
                 future_jobs
             })
-            .map_err(|_| PoisonLock)?;
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
 
         let extranonce_len = self_
             .safe_lock(|s| s.channel_factory.get_extranonce_len())
-            .unwrap();
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
 
         let mut match_a_future_job = false;
         while let Some(job) = future_jobs.pop() {
@@ -352,14 +389,18 @@ impl Bridge {
                 );
 
                 // Get the sender to send the mining.notify to the Downstream
-                tx_sv1_notify.send(notify.clone()).unwrap();
+                if tx_sv1_notify.send(notify.clone()).is_err() {
+                    error!("Failed to send mining.notify");
+                    // Update translator state to down
+                    ProxyState::update_translator_state(TranslatorState::Down);
+                };
                 match_a_future_job = true;
                 self_
                     .safe_lock(|s| {
                         s.last_notify = Some(notify);
                         s.last_job_id = j_id;
                     })
-                    .map_err(|_| PoisonLock)?;
+                    .map_err(|_| Error::BridgeMutexPoisoned)?;
                 break;
             }
         }
@@ -378,27 +419,42 @@ impl Bridge {
     fn handle_new_prev_hash(
         self_: Arc<Mutex<Self>>,
         mut rx_sv2_set_new_prev_hash: tokio::sync::mpsc::Receiver<SetNewPrevHash<'static>>,
-    ) -> JoinHandle<()> {
-        let tx_sv1_notify = self_.safe_lock(|s| s.tx_sv1_notify.clone()).unwrap();
+    ) -> Result<JoinHandle<()>, Error<'static>> {
+        let tx_sv1_notify = self_
+            .safe_lock(|s| s.tx_sv1_notify.clone())
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
         debug!("Starting handle_new_prev_hash task");
-        tokio::task::spawn(async move {
+        Ok(tokio::task::spawn(async move {
             loop {
                 // Receive `SetNewPrevHash` from `Upstream`
                 let sv2_set_new_prev_hash: SetNewPrevHash =
-                    rx_sv2_set_new_prev_hash.recv().await.unwrap();
+                    match rx_sv2_set_new_prev_hash.recv().await {
+                        Some(set_new_prev_hash) => set_new_prev_hash,
+                        None => {
+                            error!("Failed to receive SetNewPrevHash");
+                            ProxyState::update_translator_state(TranslatorState::Down);
+                            break;
+                        }
+                    };
                 debug!(
                     "handle_new_prev_hash job_id: {:?}",
                     &sv2_set_new_prev_hash.job_id
                 );
-                Self::handle_new_prev_hash_(
+                if let Err(e) = Self::handle_new_prev_hash_(
                     self_.clone(),
                     sv2_set_new_prev_hash,
                     tx_sv1_notify.clone(),
                 )
                 .await
-                .unwrap()
+                {
+                    error!("Failed to handle SetNewPrevHash: {e}");
+                    ProxyState::update_upstream_state(UpstreamState::Down(
+                        UpstreamType::TranslatorUpstream,
+                    ));
+                    return;
+                }
             }
-        })
+        }))
     }
 
     async fn handle_new_extended_mining_job_(
@@ -412,26 +468,26 @@ impl Bridge {
                 s.channel_factory
                     .on_new_extended_mining_job(sv2_new_extended_mining_job.as_static().clone())
             })
-            .map_err(|_| PoisonLock)?
-            .unwrap();
+            .map_err(|_| Error::BridgeMutexPoisoned)?
+            .map_err(|_| {
+                Error::RolesSv2Logic(RolesLogicError::JobIsNotFutureButPrevHashNotPresent)
+            })?;
 
-        let extranonce_len = self_
-            .safe_lock(|s| s.channel_factory.get_extranonce_len())
-            .unwrap();
+        let extranonce_len = self_.safe_lock(|s| s.channel_factory.get_extranonce_len())?;
 
         // If future_job=true, this job is meant for a future SetNewPrevHash that the proxy
         // has yet to receive. Insert this new job into the job_mapper .
         if sv2_new_extended_mining_job.is_future() {
             self_
                 .safe_lock(|s| s.future_jobs.push(sv2_new_extended_mining_job.clone()))
-                .map_err(|_| PoisonLock)?;
+                .map_err(|_| Error::BridgeMutexPoisoned)?;
             Ok(())
 
         // If future_job=false, this job is meant for the current SetNewPrevHash.
         } else {
             let last_p_hash_option = self_
                 .safe_lock(|s| s.last_p_hash.clone())
-                .map_err(|_| PoisonLock)?;
+                .map_err(|_| Error::BridgeMutexPoisoned)?;
 
             // last_p_hash is an Option<SetNewPrevHash> so we need to map to the correct error type to be handled
             let last_p_hash = last_p_hash_option.ok_or(Error::RolesSv2Logic(
@@ -449,13 +505,16 @@ impl Bridge {
                 extranonce_len,
             );
             // Get the sender to send the mining.notify to the Downstream
-            tx_sv1_notify.send(notify.clone()).unwrap();
+            tx_sv1_notify
+                .send(notify.clone())
+                .map_err(|_| Error::AsyncChannelError)?;
+
             self_
                 .safe_lock(|s| {
                     s.last_notify = Some(notify);
                     s.last_job_id = j_id;
                 })
-                .map_err(|_| PoisonLock)?;
+                .map_err(|_| Error::BridgeMutexPoisoned)?;
             Ok(())
         }
     }
@@ -471,29 +530,41 @@ impl Bridge {
     fn handle_new_extended_mining_job(
         self_: Arc<Mutex<Self>>,
         mut rx_sv2_new_ext_mining_job: tokio::sync::mpsc::Receiver<NewExtendedMiningJob<'static>>,
-    ) -> JoinHandle<()> {
-        let tx_sv1_notify = self_.safe_lock(|s| s.tx_sv1_notify.clone()).unwrap();
+    ) -> Result<JoinHandle<()>, Error<'static>> {
+        let tx_sv1_notify = self_
+            .safe_lock(|s| s.tx_sv1_notify.clone())
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
         debug!("Starting handle_new_extended_mining_job task");
-        tokio::task::spawn(async move {
+        Ok(tokio::task::spawn(async move {
             loop {
                 // Receive `NewExtendedMiningJob` from `Upstream`
                 let sv2_new_extended_mining_job: NewExtendedMiningJob =
-                    rx_sv2_new_ext_mining_job.recv().await.unwrap();
+                    match rx_sv2_new_ext_mining_job.recv().await {
+                        Some(sv2_new_extended_mining_job) => sv2_new_extended_mining_job,
+                        None => {
+                            error!("Failed to receive NewExtendedMiningJob from upstream");
+                            ProxyState::update_translator_state(TranslatorState::Down);
+                            break;
+                        }
+                    };
                 debug!(
                     "handle_new_extended_mining_job job_id: {:?}",
                     &sv2_new_extended_mining_job.job_id
                 );
-                Self::handle_new_extended_mining_job_(
+                if let Err(e) = Self::handle_new_extended_mining_job_(
                     self_.clone(),
                     sv2_new_extended_mining_job,
                     tx_sv1_notify.clone(),
                 )
                 .await
-                .unwrap();
+                {
+                    error!("Failed to handle NewExtendedMiningJob {e}",);
+                    ProxyState::update_translator_state(TranslatorState::Down);
+                };
                 super::super::upstream::upstream::IS_NEW_JOB_HANDLED
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-        })
+        }))
     }
 }
 #[derive(Debug)]
@@ -514,7 +585,7 @@ mod test {
     pub mod test_utils {
         use super::*;
 
-        pub fn create_bridge(extranonces: ExtendedExtranonce) -> Arc<Mutex<Bridge>> {
+        pub fn create_bridge(extranonces: ExtendedExtranonce) -> Result<Arc<Mutex<Bridge>>, ()> {
             let (tx_sv2_submit_shares_ext, _rx_sv2_submit_shares_ext) = mpsc::channel(1);
             let (tx_sv1_notify, _rx_sv1_notify) = broadcast::channel(1);
             let upstream_target = vec![
@@ -528,8 +599,9 @@ mod test {
                 extranonces,
                 Arc::new(Mutex::new(upstream_target)),
                 1,
-            );
-            b
+            )
+            .map_err(|_| ())?;
+            Ok(b)
         }
 
         pub fn create_sv1_submit(job_id: u32) -> Submit<'static> {
@@ -550,7 +622,10 @@ mod test {
         use bitcoin::{blockdata::witness::Witness, hashes::Hash};
 
         let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
-        let bridge = test_utils::create_bridge(extranonces);
+        let bridge = match test_utils::create_bridge(extranonces) {
+            Ok(bridge) => bridge,
+            Err(_) => return,
+        };
         bridge
             .safe_lock(|bridge| {
                 let channel_id = 1;

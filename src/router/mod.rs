@@ -22,7 +22,6 @@ use crate::{
 };
 
 /// Router handles connection to Multiple upstreams.
-
 pub struct Router {
     pool_addresses: Vec<SocketAddr>,
     current_pool: Option<SocketAddr>,
@@ -76,7 +75,7 @@ impl Router {
             info!("Latency for upstream {:?} is {:?}", pool, latency);
             Some(pool)
         } else {
-            info!("No available pool");
+            //info!("No available pool");
             None
         }
     }
@@ -122,17 +121,18 @@ impl Router {
             tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
             AbortOnDrop,
         ),
-        (),
+        minin_pool_connection::errors::Error,
     > {
         let pool = match pool_addr {
             Some(addr) => addr,
-            None => self
-                .select_pool_connect()
-                .await
-                .ok_or(())
-                // Called when we initialize the proxy, without a pool we can not start mine and we
-                // fail
-                .expect("Failed to select pool"),
+            None => match self.select_pool_connect().await {
+                Some(addr) => addr,
+                // Called when we initialize the proxy, without a valid pool we can not start mine and we
+                // return Err
+                None => {
+                    return Err(minin_pool_connection::errors::Error::Unrecoverable);
+                }
+            },
         };
         self.current_pool = Some(pool);
 
@@ -150,7 +150,7 @@ impl Router {
                 Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
             }
 
-            Err(_) => Err(()),
+            Err(e) => Err(e),
         }
     }
 
@@ -169,9 +169,14 @@ impl Router {
         .await)
             .is_err()
         {
+            error!(
+                "Failed to get mining setup latencies for: {:?}",
+                pool_address
+            );
             return Err(());
         }
         if (PoolLatency::get_jd_latencies(&mut pool, auth_pub_key).await).is_err() {
+            error!("Failed to get jd setup latencies for: {:?}", pool_address);
             return Err(());
         }
 
@@ -238,12 +243,7 @@ impl PoolLatency {
     ) -> Result<(), ()> {
         // Set open_sv2_mining_connection latency
         let open_sv2_mining_connection_timer = Instant::now();
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(crate::POOL_ADDRESS),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(self.pool)).await {
             Ok(Ok(stream)) => {
                 self.open_sv2_mining_connection = Some(open_sv2_mining_connection_timer.elapsed());
 

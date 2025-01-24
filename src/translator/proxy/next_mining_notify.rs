@@ -39,7 +39,7 @@ pub fn create_notify(
     let bits = HexU32Be(new_prev_hash.nbits);
     let time = HexU32Be(match new_job.is_future() {
         true => new_prev_hash.min_ntime,
-        false => new_job.min_ntime.clone().into_inner().unwrap(),
+        false => new_job.min_ntime.clone().into_inner().expect("Internal error: this operation can not fail because the U32 can always be converted into Inner"),
     });
 
     let notify_response = server_to_client::Notify {

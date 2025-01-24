@@ -1,4 +1,8 @@
 use super::{downstream::Downstream, task_manager::TaskManager};
+use crate::{
+    proxy_state::{DownstreamState, DownstreamType, ProxyState},
+    translator::error::Error,
+};
 use roles_logic_sv2::utils::Mutex;
 use std::sync::Arc;
 use sv1_api::{client_to_server::Submit, json_rpc};
@@ -11,7 +15,7 @@ pub async fn start_receive_downstream(
     downstream: Arc<Mutex<Downstream>>,
     mut recv_from_down: mpsc::Receiver<String>,
     connection_id: u32,
-) -> Result<(), ()> {
+) -> Result<(), Error<'static>> {
     let handle = task::spawn(async move {
         while let Some(incoming) = recv_from_down.recv().await {
             let incoming: Result<json_rpc::Message, _> = serde_json::from_str(&incoming);
@@ -25,18 +29,31 @@ pub async fn start_receive_downstream(
                         }
                     }
                 }
-                // TODO handle panic
-                Downstream::handle_incoming_sv1(downstream.clone(), incoming)
-                    .await
-                    .unwrap();
+
+                if let Err(error) =
+                    Downstream::handle_incoming_sv1(downstream.clone(), incoming).await
+                {
+                    error!("Failed to handle incoming sv1 msg: {:?}", error);
+                    ProxyState::update_downstream_state(DownstreamState::Down(
+                        DownstreamType::TranslatorDownstream,
+                    ));
+                };
             } else {
-                break;
+                // Message received could not be converted to rpc message
+                error!(
+                    "{}",
+                    Error::V1Protocol(sv1_api::error::Error::InvalidJsonRpcMessageKind,)
+                );
+                return;
             }
         }
+        // No message to receive
         warn!(
             "Downstream: Shutting down sv1 downstream reader {}",
             connection_id
         );
     });
-    TaskManager::add_receive_downstream(task_manager, handle.into()).await
+    TaskManager::add_receive_downstream(task_manager, handle.into())
+        .await
+        .map_err(|_| Error::TranslatorTaskManagerFailed)
 }

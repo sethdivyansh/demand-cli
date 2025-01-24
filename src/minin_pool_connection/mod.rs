@@ -1,3 +1,4 @@
+pub(crate) mod errors;
 mod task_manager;
 
 use std::net::SocketAddr;
@@ -5,6 +6,7 @@ use std::net::SocketAddr;
 use codec_sv2::{HandshakeRole, StandardEitherFrame, StandardSv2Frame};
 use demand_share_accounting_ext::parser::PoolExtMessages;
 use demand_sv2_connection::noise_connection_tokio::Connection;
+use errors::Error;
 use key_utils::Secp256k1PublicKey;
 use noise_sv2::Initiator;
 use rand::distributions::{Alphanumeric, DistString};
@@ -16,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info};
 
-use crate::shared::utils::AbortOnDrop;
+use crate::{proxy_state::ProxyState, shared::utils::AbortOnDrop, PoolState};
 use task_manager::TaskManager;
 
 pub type Message = PoolExtMessages<'static>;
@@ -36,7 +38,7 @@ pub async fn connect_pool(
         Receiver<PoolExtMessages<'static>>,
         AbortOnDrop,
     ),
-    (),
+    Error,
 > {
     let socket = loop {
         match TcpStream::connect(address).await {
@@ -63,37 +65,41 @@ pub async fn connect_pool(
     let (mut receiver, mut sender, _, _) =
         Connection::new(socket, HandshakeRole::Initiator(initiator))
             .await
-            .expect("Failed to create connection");
+            .map_err(|e| {
+                error!("Failed to create connection");
+                Error::SV2Connection(e)
+            })?;
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
-    if mining_setup_connection(
+    match mining_setup_connection(
         &mut receiver,
         &mut sender,
         setup_connection_msg,
         timer.unwrap_or(DEFAULT_TIMER),
     )
     .await
-    .is_ok()
     {
-        let task_manager = TaskManager::initialize();
-        let abortable = task_manager
-            .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+        Ok(_) => {
+            let task_manager = TaskManager::initialize();
+            let abortable = task_manager
+                .safe_lock(|t| t.get_aborter())
+                .map_err(|_| Error::MiningPoolMutexCorrupted)?
+                .ok_or(Error::MiningPoolTaskManagerFailed)?;
 
-        let (send_to_down, recv_from_down) = tokio::sync::mpsc::channel(10);
-        let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
-        let relay_up_task = relay_up(recv_to_up, sender);
-        TaskManager::add_sv2_relay_up(task_manager.clone(), relay_up_task)
-            .await
-            .expect("Task Manager failed");
-        let relay_down_task = relay_down(receiver, send_to_down);
-        TaskManager::add_sv2_relay_down(task_manager.clone(), relay_down_task)
-            .await
-            .expect("Task Manager failed");
-        Ok((send_from_down, recv_from_down, abortable))
-    } else {
-        Err(())
+            let (send_to_down, recv_from_down) = tokio::sync::mpsc::channel(10);
+            let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
+            let relay_up_task = relay_up(recv_to_up, sender);
+            TaskManager::add_sv2_relay_up(task_manager.clone(), relay_up_task)
+                .await
+                .map_err(|_| Error::MiningPoolTaskManagerFailed)?;
+
+            let relay_down_task = relay_down(receiver, send_to_down);
+            TaskManager::add_sv2_relay_down(task_manager.clone(), relay_down_task)
+                .await
+                .map_err(|_| Error::MiningPoolTaskManagerFailed)?;
+            Ok((send_from_down, recv_from_down, abortable))
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -108,6 +114,7 @@ pub fn relay_up(
                 let either_frame: EitherFrame = std_frame.into();
                 if send.send(either_frame).await.is_err() {
                     error!("Mining upstream failed");
+                    ProxyState::update_pool_state(PoolState::Down);
                     break;
                 };
             } else {
@@ -135,7 +142,10 @@ pub fn relay_down(
                     if let Ok(msg) = msg {
                         let msg = msg.into_static();
                         if send.send(msg).await.is_err() {
-                            panic!("Internal Mining downstream not available");
+                            error!("Internal Mining downstream not available");
+
+                            // Update Proxy state to reflect Internal inconsistency
+                            ProxyState::update_inconsistency(Some(1));
                         }
                     } else {
                         error!("Mining Upstream send non Mining message. Disconnecting");
@@ -150,6 +160,8 @@ pub fn relay_down(
                 break;
             }
         }
+        error!("Failed to receive msg from Pool");
+        ProxyState::update_pool_state(PoolState::Down);
     });
     task.into()
 }
@@ -159,31 +171,50 @@ pub async fn mining_setup_connection(
     send: &mut Sender<EitherFrame>,
     setup_conection: SetupConnection<'static>,
     timer: std::time::Duration,
-) -> Result<SetupConnectionSuccess, ()> {
+) -> Result<SetupConnectionSuccess, Error> {
     let msg = PoolExtMessages::Common(CommonMessages::SetupConnection(setup_conection));
-    let std_frame: StdFrame = msg.try_into().unwrap();
+    let std_frame: StdFrame = match msg.try_into() {
+        Ok(frame) => frame,
+        Err(e) => {
+            error!("Failed to convert PoolExtMessages to StdFrame.");
+            return Err(Error::RolesSv2Logic(e));
+        }
+    };
     let either_frame: EitherFrame = std_frame.into();
-    send.send(either_frame).await.unwrap();
+    if send.send(either_frame).await.is_err() {
+        error!("Failed to send Eitherframe");
+        return Err(Error::Unrecoverable);
+    }
     if let Ok(Some(msg)) = tokio::time::timeout(timer, recv.recv()).await {
-        let mut msg: StdFrame = msg.try_into().map_err(|_| ())?;
-        let header = msg.get_header().ok_or(())?;
+        let mut msg: StdFrame = msg.try_into().map_err(Error::FramingSv2)?;
+        let header = msg.get_header().ok_or(Error::UnexpectedMessage)?;
         let message_type = header.msg_type();
         let payload = msg.payload();
-        let msg: CommonMessages<'_> = (message_type, payload).try_into().unwrap();
+        let msg: CommonMessages<'_> = match (message_type, payload).try_into() {
+            Ok(message) => message,
+            Err(e) => {
+                error!("Unexpected Message: {e}");
+                return Err(Error::UpstreamIncoming(e));
+            }
+        };
         match msg {
             CommonMessages::SetupConnectionSuccess(s) => Ok(s),
-            _ => Err(()),
+            e => {
+                error!("Unexpected Message: {e:?}");
+                Err(Error::UnexpectedMessage)
+            }
         }
     } else {
-        Err(())
+        error!("Failed to setup connection: Timeout");
+        Err(Error::Timeout)
     }
 }
 
 pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<'static> {
-    let endpoint_host = "0.0.0.0".to_string().into_bytes().try_into().unwrap();
-    let vendor = String::new().try_into().unwrap();
-    let hardware_version = String::new().try_into().unwrap();
-    let firmware = String::new().try_into().unwrap();
+    let endpoint_host = "0.0.0.0".to_string().into_bytes().try_into().expect("Internal error: this operation can not fail because the string 0.0.0.0 can always be converted into Inner");
+    let vendor = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
+    let hardware_version = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
+    let firmware = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
     let flags = match work_selection {
         false => 0b0000_0000_0000_0000_0000_0000_0000_0100,
         true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
@@ -193,7 +224,7 @@ pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<
     let device_id = format!("{}::POOLED::{}", device_id, token)
         .to_string()
         .try_into()
-        .unwrap();
+        .expect("Internal error: this operation can not fail because an device_id can always be converted into Inner");
     SetupConnection {
         protocol: Protocol::MiningProtocol,
         min_version: 2,

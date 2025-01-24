@@ -1,10 +1,11 @@
 use super::task_manager::TaskManager;
+use crate::translator::error::Error;
 use roles_logic_sv2::utils::Mutex;
 use std::sync::Arc;
 use sv1_api::json_rpc;
 use tokio::sync::mpsc;
 use tokio::task;
-use tracing::warn;
+use tracing::{error, warn};
 
 pub async fn start_send_to_downstream(
     task_manager: Arc<Mutex<TaskManager>>,
@@ -12,21 +13,19 @@ pub async fn start_send_to_downstream(
     send_to_down: mpsc::Sender<String>,
     connection_id: u32,
     host: String,
-) -> Result<(), ()> {
+) -> Result<(), Error<'static>> {
     let handle = task::spawn(async move {
         while let Some(res) = receiver_outgoing.recv().await {
             let to_send = match serde_json::to_string(&res) {
                 Ok(string) => format!("{}\n", string),
-                Err(_e) => {
+                Err(e) => {
+                    error!("Failed to serialize msg {e:?}");
                     break;
                 }
             };
-            match send_to_down.send(to_send).await {
-                Ok(_) => (),
-                Err(_e) => {
-                    warn!("Downstream {} dropped", host);
-                    break;
-                }
+            if send_to_down.send(to_send).await.is_err() {
+                warn!("Downstream {} dropped", host);
+                break;
             }
         }
         warn!(
@@ -34,5 +33,7 @@ pub async fn start_send_to_downstream(
             connection_id
         );
     });
-    TaskManager::add_send_downstream(task_manager, handle.into()).await
+    TaskManager::add_send_downstream(task_manager, handle.into())
+        .await
+        .map_err(|_| Error::TranslatorTaskManagerFailed)
 }

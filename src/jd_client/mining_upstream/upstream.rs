@@ -1,4 +1,7 @@
-use crate::{jd_client::error::ProxyResult, shared::utils::AbortOnDrop};
+use crate::proxy_state::{
+    DownstreamState, DownstreamType, ProxyState, TpState, UpstreamState, UpstreamType,
+};
+use crate::{jd_client::error::Error, jd_client::error::ProxyResult, shared::utils::AbortOnDrop};
 
 use crate::jd_client::mining_downstream::DownstreamMiningNode as Downstream;
 
@@ -113,10 +116,12 @@ impl Upstream {
     pub async fn send(self_: &Arc<Mutex<Self>>, message: Mining<'static>) -> ProxyResult<()> {
         let sender = self_
             .safe_lock(|s| s.sender.clone())
-            // TODO TODO TODO
-            .unwrap();
-        // TODO TODO TODO
-        sender.send(message).await.unwrap();
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?;
+
+        sender
+            .send(message)
+            .await
+            .map_err(|_| Error::Unrecoverable)?;
         Ok(())
     }
     /// Instantiate a new `Upstream`.
@@ -157,9 +162,14 @@ impl Upstream {
         template_id: u64,
     ) -> ProxyResult<()> {
         info!("Sending set custom mining job");
-        let request_id = self_.safe_lock(|s| s.req_ids.next()).unwrap();
+        let request_id = self_
+            .safe_lock(|s| s.req_ids.next())
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?;
         let channel_id = loop {
-            if let Some(id) = self_.safe_lock(|s| s.channel_id).unwrap() {
+            if let Some(id) = self_
+                .safe_lock(|s| s.channel_id)
+                .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
+            {
                 break id;
             };
             tokio::task::yield_now().await;
@@ -167,7 +177,7 @@ impl Upstream {
 
         let updated_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("Internal error: this operation can not fail because SystemTime should always be later than UNIX_EPOCH")
             .as_secs() as u32;
 
         let to_send = SetCustomMiningJob {
@@ -182,7 +192,7 @@ impl Upstream {
             coinbase_prefix,
             coinbase_tx_input_n_sequence,
             coinbase_tx_value_remaining,
-            coinbase_tx_outputs: coinbase_tx_outs.try_into().unwrap(),
+            coinbase_tx_outputs: coinbase_tx_outs.try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into Inner"),
             coinbase_tx_locktime,
             merkle_path,
             extranonce_size: 0,
@@ -193,7 +203,7 @@ impl Upstream {
                 s.template_to_job_id
                     .register_template_id(template_id, request_id)
             })
-            .unwrap();
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?;
         Self::send(self_, message).await
     }
 
@@ -204,16 +214,29 @@ impl Upstream {
         mut recv: TReceiver<Mining<'static>>,
     ) -> ProxyResult<AbortOnDrop> {
         let task_manager = TaskManager::initialize();
-        let abortable = task_manager
+        let abortable = match task_manager
             .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+            .map_err(|_| Error::JdClientUpstreamTaskManagerFailed)?
+        {
+            Some(abortable) => abortable,
+            None => {
+                return Err(Error::Unrecoverable);
+            }
+        };
         let main_task = {
             let self_ = self_.clone();
             task::spawn(async move {
                 loop {
                     // Waiting to receive a message from the SV2 Upstream role
-                    let incoming = recv.recv().await.expect("Upstream down");
+                    let incoming = match recv.recv().await {
+                        Some(msg) => msg,
+                        None => {
+                            error!("Upstream down");
+                            // Update the proxy state to reflect the Tp is down
+                            ProxyState::update_tp_state(TpState::Down);
+                            break;
+                        }
+                    };
 
                     // Since this is not communicating with an SV2 proxy, but instead a custom SV1
                     // proxy where the routing logic is handled via the `Upstream`'s communication
@@ -231,12 +254,23 @@ impl Upstream {
                     match next_message_to_send {
                         // This is a transparent proxy it will only relay messages as received
                         Ok(SendTo::RelaySameMessageToRemote(downstream_mutex)) => {
-                            Downstream::send(&downstream_mutex, incoming).await.unwrap();
+                            if Downstream::send(&downstream_mutex, incoming).await.is_err() {
+                                error!("Failed to send message downstream");
+                                // Update global proxy downstream state
+                                ProxyState::update_downstream_state(DownstreamState::Down(
+                                    DownstreamType::JdClientMiningDownstream,
+                                ));
+                                break;
+                            };
                         }
                         Ok(SendTo::None(_)) => (),
                         Ok(_) => unreachable!(),
-                        Err(_e) => {
-                            // TODO TODO TODO
+                        Err(e) => {
+                            error!("{e:?}");
+                            ProxyState::update_upstream_state(UpstreamState::Down(
+                                UpstreamType::JDCMiningUpstream,
+                            ));
+                            break;
                         }
                     }
                 }
@@ -244,30 +278,36 @@ impl Upstream {
         };
         TaskManager::add_main_task(task_manager.clone(), main_task.into())
             .await
-            .unwrap();
+            .map_err(|_| Error::JdClientUpstreamTaskManagerFailed)?;
         Ok(abortable)
     }
 
-    pub async fn take_channel_factory(self_: Arc<Mutex<Self>>) -> PoolChannelFactory {
-        while self_.safe_lock(|s| s.channel_factory.is_none()).unwrap() {
+    pub async fn take_channel_factory(
+        self_: Arc<Mutex<Self>>,
+    ) -> Result<PoolChannelFactory, Error> {
+        while self_
+            .safe_lock(|s| s.channel_factory.is_none())
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
+        {
             tokio::task::yield_now().await;
         }
+
         self_
             .safe_lock(|s| {
                 let mut factory = None;
                 std::mem::swap(&mut s.channel_factory, &mut factory);
-                factory.unwrap()
+                factory.ok_or(Error::Unrecoverable)
             })
-            .unwrap()
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
     }
 
-    pub async fn get_job_id(self_: &Arc<Mutex<Self>>, template_id: u64) -> u32 {
+    pub async fn get_job_id(self_: &Arc<Mutex<Self>>, template_id: u64) -> Result<u32, Error> {
         loop {
             if let Some(id) = self_
                 .safe_lock(|s| s.template_to_job_id.get_job_id(template_id))
-                .unwrap()
+                .map_err(|_| Error::JdClientDownstreamMutexCorrupted)?
             {
-                return id;
+                return Ok(id);
             }
             tokio::task::yield_now().await;
         }
@@ -380,13 +420,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             vec![],
             vec![],
         )
-        .expect("Signature + extranonce lens exceed 32 bytes");
+        .inspect_err(|_| {
+            error!("Signature + extranonce lens exceed 32 bytes");
+        })?;
         let extranonce: Extranonce = m
             .extranonce_prefix
             .into_static()
             .to_vec()
             .try_into()
-            .unwrap();
+            .expect("Internal error: this operation can not fail because extranonce_pref can always be converted to Vec<u8>");
         self.channel_id = Some(m.channel_id);
         channel_factory
             .replicate_upstream_extended_channel_only_jd(
@@ -398,9 +440,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             .expect("Impossible to open downstream channel");
         self.channel_factory = Some(channel_factory);
 
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+        let downstream = match self.downstream.as_ref() {
+            Some(downstream) => downstream.clone(),
+            None => {
+                error!("Downstream not available");
+                return Err(RolesLogicError::DownstreamDown);
+            }
+        };
+
+        Ok(SendTo::RelaySameMessageToRemote(downstream))
     }
 
     /// Handles the SV2 `OpenExtendedMiningChannelError` message (TODO).
@@ -408,9 +456,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _: roles_logic_sv2::mining_sv2::OpenMiningChannelError,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+        let downstream = match self.downstream.as_ref() {
+            Some(downstream) => downstream.clone(),
+            None => {
+                error!("Downstream not available");
+                return Err(RolesLogicError::DownstreamDown);
+            }
+        };
+
+        Ok(SendTo::RelaySameMessageToRemote(downstream))
     }
 
     /// Handles the SV2 `UpdateChannelError` message (TODO).
@@ -418,9 +472,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _m: roles_logic_sv2::mining_sv2::UpdateChannelError,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+        let downstream = match self.downstream.as_ref() {
+            Some(downstream) => downstream.clone(),
+            None => {
+                error!("Downstream not available");
+                return Err(RolesLogicError::DownstreamDown);
+            }
+        };
+
+        Ok(SendTo::RelaySameMessageToRemote(downstream))
     }
 
     /// Handles the SV2 `CloseChannel` message (TODO).
@@ -428,9 +488,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _m: roles_logic_sv2::mining_sv2::CloseChannel,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+        let downstream = match self.downstream.as_ref() {
+            Some(downstream) => downstream.clone(),
+            None => {
+                error!("Downstream not available");
+                return Err(RolesLogicError::DownstreamDown);
+            }
+        };
+
+        Ok(SendTo::RelaySameMessageToRemote(downstream))
     }
 
     /// Handles the SV2 `SetExtranoncePrefix` message (TODO).
@@ -438,9 +504,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _: roles_logic_sv2::mining_sv2::SetExtranoncePrefix,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+        let downstream = match self.downstream.as_ref() {
+            Some(downstream) => downstream.clone(),
+            None => {
+                error!("Downstream not available");
+                return Err(RolesLogicError::DownstreamDown);
+            }
+        };
+
+        Ok(SendTo::RelaySameMessageToRemote(downstream))
     }
 
     /// Handles the SV2 `SubmitSharesSuccess` message.
@@ -448,9 +520,11 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _m: roles_logic_sv2::mining_sv2::SubmitSharesSuccess,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+        if let Some(downstream) = &self.downstream {
+            Ok(SendTo::RelaySameMessageToRemote(downstream.clone()))
+        } else {
+            Err(RolesLogicError::DownstreamDown)
+        }
     }
 
     /// Handles the SV2 `SubmitSharesError` message.
@@ -533,15 +607,26 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             factory.set_target(&mut m.maximum_target.clone().into());
         }
         if let Some(downstream) = &self.downstream {
-            let _ = downstream.safe_lock(|d| {
-                let factory = d.status.get_channel();
-                factory.set_target(&mut m.maximum_target.clone().into());
-                factory.update_target_for_channel(m.channel_id, m.maximum_target.into());
-            });
+            downstream
+                .safe_lock(|d| {
+                    match d.status.get_channel() {
+                        Ok(factory) => {
+                            let mut target = m.maximum_target.clone().into();
+                            factory.set_target(&mut target);
+                            factory.update_target_for_channel(m.channel_id, target);
+                        }
+                        Err(_) => return Err(RolesLogicError::NotFoundChannelId),
+                    }
+                    Ok(())
+                })
+                .map_err(|_| RolesLogicError::DownstreamDown)??;
         }
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+
+        if let Some(downstream) = &self.downstream {
+            Ok(SendTo::RelaySameMessageToRemote(downstream.clone()))
+        } else {
+            Err(RolesLogicError::DownstreamDown)
+        }
     }
 
     /// Handles the SV2 `Reconnect` message (TODO).
@@ -549,8 +634,10 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _m: roles_logic_sv2::mining_sv2::Reconnect,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
-        Ok(SendTo::RelaySameMessageToRemote(
-            self.downstream.as_ref().unwrap().clone(),
-        ))
+        if let Some(downstream) = &self.downstream {
+            Ok(SendTo::RelaySameMessageToRemote(downstream.clone()))
+        } else {
+            Err(RolesLogicError::DownstreamDown)
+        }
     }
 }

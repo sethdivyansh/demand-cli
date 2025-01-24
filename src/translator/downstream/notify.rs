@@ -1,4 +1,6 @@
+use crate::proxy_state::{DownstreamState, DownstreamType, ProxyState};
 use crate::translator::downstream::SUBSCRIBE_TIMEOUT_SECS;
+use crate::translator::error::Error;
 
 use super::{downstream::Downstream, task_manager::TaskManager};
 use roles_logic_sv2::utils::Mutex;
@@ -16,7 +18,7 @@ pub async fn start_notify(
     last_notify: Option<server_to_client::Notify<'static>>,
     host: String,
     connection_id: u32,
-) -> Result<(), ()> {
+) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
         task::spawn(async move {
@@ -26,47 +28,64 @@ pub async fn start_notify(
                 let is_a = match downstream.safe_lock(|d| !d.authorized_names.is_empty()) {
                     Ok(is_a) => is_a,
                     Err(e) => {
-                        error!("{}", e);
+                        error!("{e}");
+                        ProxyState::update_downstream_state(DownstreamState::Down(
+                            DownstreamType::TranslatorDownstream,
+                        ));
                         break;
                     }
                 };
                 if is_a && !first_sent && last_notify.is_some() {
-                    Downstream::init_difficulty_management(&downstream)
-                        .await
-                        .unwrap();
+                    if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
+                        error!("Failed to initailize difficulty managemant {e}")
+                    };
 
-                    let sv1_mining_notify_msg = last_notify.clone().unwrap();
+                    let sv1_mining_notify_msg = match last_notify.clone() {
+                        Some(sv1_mining_notify_msg) => sv1_mining_notify_msg,
+                        None => {
+                            error!("sv1_mining_notify_msg is None");
+                            ProxyState::update_downstream_state(DownstreamState::Down(
+                                DownstreamType::TranslatorDownstream,
+                            ));
+                            break;
+                        }
+                    };
                     let message: json_rpc::Message = sv1_mining_notify_msg.into();
-                    Downstream::send_message_downstream(downstream.clone(), message)
-                        .await
-                        .unwrap();
-                    if let Err(e) = downstream.clone().safe_lock(|s| {
-                        s.first_job_received = true;
-                    }) {
-                        error!("{}", e);
+                    Downstream::send_message_downstream(downstream.clone(), message).await;
+                    if downstream
+                        .clone()
+                        .safe_lock(|s| {
+                            s.first_job_received = true;
+                        })
+                        .is_err()
+                    {
+                        error!("Translator Downstream Mutex Poisoned");
+                        ProxyState::update_downstream_state(DownstreamState::Down(
+                            DownstreamType::TranslatorDownstream,
+                        ));
                         break;
                     }
                     first_sent = true;
                 } else if is_a && last_notify.is_some() {
-                    if start_update(task_manager, downstream.clone())
-                        .await
-                        .is_err()
-                    {
-                        warn!("Translator impossible to start update task");
+                    if let Err(e) = start_update(task_manager, downstream.clone()).await {
+                        warn!("Translator impossible to start update task: {e}");
                         break;
                     };
 
                     while let Ok(sv1_mining_notify_msg) = rx_sv1_notify.recv().await {
-                        downstream
+                        if downstream
                             .safe_lock(|d| d.last_notify = Some(sv1_mining_notify_msg.clone()))
-                            .unwrap();
-                        let message: json_rpc::Message = sv1_mining_notify_msg.into();
-                        if Downstream::send_message_downstream(downstream.clone(), message)
-                            .await
                             .is_err()
                         {
+                            error!("Translator Downstream Mutex Poisoned");
+                            ProxyState::update_downstream_state(DownstreamState::Down(
+                                DownstreamType::TranslatorDownstream,
+                            ));
                             break;
-                        };
+                        }
+
+                        let message: json_rpc::Message = sv1_mining_notify_msg.into();
+                        Downstream::send_message_downstream(downstream.clone(), message).await;
                     }
                     break;
                 } else {
@@ -90,22 +109,35 @@ pub async fn start_notify(
             );
         })
     };
-    TaskManager::add_notify(task_manager, handle.into()).await
+    TaskManager::add_notify(task_manager, handle.into())
+        .await
+        .map_err(|_| Error::TranslatorTaskManagerFailed)
 }
 
 async fn start_update(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
-) -> Result<(), ()> {
+) -> Result<(), Error<'static>> {
     let handle = task::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-            let ln = downstream.safe_lock(|d| d.last_notify.clone()).unwrap();
+            let ln = match downstream.safe_lock(|d| d.last_notify.clone()) {
+                Ok(ln) => ln,
+                Err(e) => {
+                    error!("{e}");
+                    return;
+                }
+            };
             assert!(ln.is_some());
             // if hashrate has changed, update difficulty management, and send new
             // mining.set_difficulty
-            let _ = Downstream::try_update_difficulty_settings(&downstream, ln).await;
+            if let Err(e) = Downstream::try_update_difficulty_settings(&downstream, ln).await {
+                error!("{e}");
+                return;
+            };
         }
     });
-    TaskManager::add_update(task_manager, handle.into()).await
+    TaskManager::add_update(task_manager, handle.into())
+        .await
+        .map_err(|_| Error::TranslatorTaskManagerFailed)
 }

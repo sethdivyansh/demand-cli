@@ -1,8 +1,12 @@
 mod task_manager;
-use crate::shared::utils::AbortOnDrop;
+use crate::{
+    proxy_state::{DownstreamState, DownstreamType, JdState, ProxyState},
+    shared::utils::AbortOnDrop,
+};
 use tokio::time::{timeout, Duration};
 
 use super::{job_declarator::JobDeclarator, mining_upstream::Upstream as UpstreamMiningNode};
+use crate::jd_client::error::Error as JdClientError;
 use roles_logic_sv2::{
     channel_logic::channel_factory::{OnNewShare, PoolChannelFactory, Share},
     common_properties::{CommonDownstreamData, IsDownstream, IsMiningDownstream},
@@ -73,12 +77,12 @@ impl DownstreamMiningNodeStatus {
         }
     }
 
-    pub fn get_channel(&mut self) -> &mut PoolChannelFactory {
+    pub fn get_channel(&mut self) -> Result<&mut PoolChannelFactory, Error> {
         match self {
-            DownstreamMiningNodeStatus::Paired(_) => panic!(),
-            DownstreamMiningNodeStatus::ChannelOpened((channel, _)) => channel,
-            DownstreamMiningNodeStatus::SoloMinerPaired() => panic!(),
-            DownstreamMiningNodeStatus::SoloMinerChannelOpend(channel) => channel,
+            DownstreamMiningNodeStatus::Paired(_) => Err(Error::DownstreamDown),
+            DownstreamMiningNodeStatus::ChannelOpened((channel, _)) => Ok(channel),
+            DownstreamMiningNodeStatus::SoloMinerPaired() => Err(Error::DownstreamDown),
+            DownstreamMiningNodeStatus::SoloMinerChannelOpend(channel) => Ok(channel),
         }
     }
     fn have_channel(&self) -> bool {
@@ -142,49 +146,76 @@ impl DownstreamMiningNode {
     pub async fn start(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<Mining<'static>>,
-    ) -> AbortOnDrop {
+    ) -> Result<AbortOnDrop, JdClientError> {
         let task_manager = TaskManager::initialize();
-        let abortable = task_manager
+        let abortable = match task_manager
             .safe_lock(|t| t.get_aborter())
-            .unwrap()
-            .unwrap();
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?
+        {
+            Some(abortable) => abortable,
+            // Aborter is None
+            None => {
+                error!("Failed to get Aborter: Not found.");
+                return Err(JdClientError::JdClientDownstreamTaskManagerFailed);
+            }
+        };
         let factory_abortable = DownstreamMiningNode::set_channel_factory(self_mutex.clone());
-        TaskManager::add_set_channel_factory(task_manager.clone(), factory_abortable)
+        TaskManager::add_set_channel_factory(task_manager.clone(), factory_abortable?)
             .await
-            .unwrap();
+            .map_err(|_| JdClientError::JdClientDownstreamTaskManagerFailed)?;
         let main_task = task::spawn(async move {
             while let Some(message) = receiver.recv().await {
-                DownstreamMiningNode::next(&self_mutex, message).await;
+                if let Err(e) = DownstreamMiningNode::next(&self_mutex, message).await {
+                    error!("{e:?}");
+                    //update global downstream state to down
+                    ProxyState::update_downstream_state(DownstreamState::Down(
+                        DownstreamType::JdClientMiningDownstream,
+                    ));
+                };
             }
         });
         TaskManager::add_main_task(task_manager, main_task.into())
             .await
-            .unwrap();
-        abortable
+            .map_err(|_| JdClientError::JdClientDownstreamTaskManagerFailed)?;
+        Ok(abortable)
     }
 
     // When we do pooled minig we create a channel factory when the pool send a open extended
     // mining channel success
-    fn set_channel_factory(self_mutex: Arc<Mutex<Self>>) -> AbortOnDrop {
-        tokio::task::spawn(async move {
-            if !self_mutex.safe_lock(|s| s.status.is_solo_miner()).unwrap() {
+    fn set_channel_factory(self_mutex: Arc<Mutex<Self>>) -> Result<AbortOnDrop, JdClientError> {
+        let is_solo_miner = self_mutex
+            .safe_lock(|s| s.status.is_solo_miner())
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
+        let handle = tokio::task::spawn(async move {
+            if !is_solo_miner {
                 // Safe unwrap already checked if it contains an upstream withe `is_solo_miner`
-                let upstream = self_mutex
-                    .safe_lock(|s| s.status.get_upstream().unwrap())
-                    .unwrap();
-                let factory = UpstreamMiningNode::take_channel_factory(upstream).await;
-                self_mutex
-                    .safe_lock(|s| {
-                        s.status.set_channel(factory);
-                    })
-                    .unwrap();
+                let upstream = match self_mutex.safe_lock(|s| s.status.get_upstream()) {
+                    Ok(upstream) => upstream.unwrap(),
+                    Err(_) => {
+                        error!("{}", JdClientError::JdClientDownstreamMutexCorrupted);
+                        return;
+                    }
+                };
+                if let Ok(factory) = UpstreamMiningNode::take_channel_factory(upstream).await {
+                    if self_mutex
+                        .safe_lock(|s| {
+                            s.status.set_channel(factory);
+                        })
+                        .is_err()
+                    {
+                        error!("{}", JdClientError::JdClientDownstreamTaskManagerFailed);
+                    }
+                }
             }
-        })
-        .into()
+        });
+        Ok(handle.into())
     }
 
     /// Parse the received message and relay it to the right upstream
-    pub async fn next(self_mutex: &Arc<Mutex<Self>>, incoming: Mining<'static>) {
+    pub async fn next(
+        self_mutex: &Arc<Mutex<Self>>,
+        incoming: Mining<'static>,
+    ) -> Result<(), JdClientError> {
         let routing_logic = roles_logic_sv2::routing_logic::MiningRoutingLogic::None;
 
         let next_message_to_send =
@@ -193,7 +224,8 @@ impl DownstreamMiningNode {
                 Ok(incoming.clone()),
                 routing_logic,
             );
-        Self::match_send_to(self_mutex.clone(), next_message_to_send, Some(incoming)).await;
+        Self::match_send_to(self_mutex.clone(), next_message_to_send, Some(incoming)).await
+        //Propgate error, caller will restart proxy
     }
 
     #[async_recursion::async_recursion]
@@ -201,110 +233,158 @@ impl DownstreamMiningNode {
         self_mutex: Arc<Mutex<Self>>,
         next_message_to_send: Result<SendTo<UpstreamMiningNode>, Error>,
         incoming: Option<Mining<'static>>,
-    ) {
+    ) -> Result<(), JdClientError> {
         match next_message_to_send {
             Ok(SendTo::RelaySameMessageToRemote(upstream_mutex)) => {
-                let incoming = incoming.expect("JDC dowstream try to releay an inexistent message");
-                UpstreamMiningNode::send(&upstream_mutex, incoming)
-                    .await
-                    .unwrap();
+                let incoming = match incoming {
+                    Some(incoming) => incoming,
+                    None => {
+                        error!("JDC dowstream try to releay an inexistent message");
+                        ProxyState::update_jd_state(JdState::Down);
+                        return Err(JdClientError::Unrecoverable);
+                    }
+                };
+                UpstreamMiningNode::send(&upstream_mutex, incoming).await?;
             }
             Ok(SendTo::RelayNewMessage(Mining::SubmitSharesExtended(mut share))) => {
                 // If we have a realy new message it means that we are in a pooled mining mods.
                 let upstream_mutex = self_mutex
-                    .safe_lock(|s| s.status.get_upstream().unwrap())
-                    .unwrap();
+                    .safe_lock(|s| s.status.get_upstream())
+                    .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?
+                    .ok_or({
+                        error!("Upstream is None Here");
+                        JdClientError::Unrecoverable
+                    })?;
                 // When re receive SetupConnectionSuccess we link the last_template_id with the
                 // pool's job_id. The below return as soon as we have a pairable job id for the
                 // template_id associated with this share.
-                let last_template_id = self_mutex.safe_lock(|s| s.last_template_id).unwrap();
+                let last_template_id = self_mutex
+                    .safe_lock(|s| s.last_template_id)
+                    .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
                 let job_id_future =
                     UpstreamMiningNode::get_job_id(&upstream_mutex, last_template_id);
-                let job_id = match timeout(Duration::from_secs(10), job_id_future).await {
-                    Ok(job_id) => job_id,
-                    Err(_) => {
-                        return;
-                    }
-                };
+                //?check
+                let job_id = timeout(Duration::from_secs(10), job_id_future)
+                    .await
+                    .map_err(|_| JdClientError::Unrecoverable)??;
                 share.job_id = job_id;
                 debug!(
                     "Sending valid block solution upstream, with job_id {}",
                     job_id
                 );
                 let message = Mining::SubmitSharesExtended(share);
-                UpstreamMiningNode::send(&upstream_mutex, message)
-                    .await
-                    .unwrap();
+                UpstreamMiningNode::send(&upstream_mutex, message).await?;
             }
             Ok(SendTo::RelayNewMessage(message)) => {
-                let upstream_mutex = self_mutex.safe_lock(|s| s.status.get_upstream().expect("We should return RelayNewMessage only if we are not in solo mining mode")).unwrap();
-                UpstreamMiningNode::send(&upstream_mutex, message)
-                    .await
-                    .unwrap();
+                let upstream_mutex = self_mutex
+                    .safe_lock(|s| s.status.get_upstream())
+                    .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?
+                    .ok_or({
+                        error!(
+                        "We should return RelayNewMessage only if we are not in solo mining mode",
+                    );
+                        JdClientError::RolesSv2Logic(Error::NoUpstreamsConnected)
+                        // Propagate error. Caller will restart proxy
+                    })?;
+                UpstreamMiningNode::send(&upstream_mutex, message).await?;
             }
             Ok(SendTo::Multiple(messages)) => {
                 for message in messages {
-                    Self::match_send_to(self_mutex.clone(), Ok(message), None).await;
+                    if let Err(e) = Self::match_send_to(self_mutex.clone(), Ok(message), None).await
+                    {
+                        error!("{e:?}");
+                        ProxyState::update_downstream_state(DownstreamState::Down(
+                            DownstreamType::JdClientMiningDownstream,
+                        ));
+                    }
                 }
             }
-            Ok(SendTo::Respond(message)) => {
-                Self::send(&self_mutex, message).await.unwrap();
-            }
+            Ok(SendTo::Respond(message)) => Self::send(&self_mutex, message).await?,
             Ok(SendTo::None(None)) => (),
             Ok(m) => unreachable!("Unexpected message type: {:?}", m),
             Err(Error::ShareDoNotMatchAnyJob) => warn!("Error: ShareDoNotMatchAnyJob"),
-            Err(_) => todo!(),
+            Err(e) => return Err(JdClientError::RolesSv2Logic(e)),
         }
+        Ok(())
     }
 
     /// Send a message downstream
-    pub async fn send(self_mutex: &Arc<Mutex<Self>>, message: Mining<'static>) -> Result<(), ()> {
-        let sender = self_mutex.safe_lock(|self_| self_.sender.clone()).unwrap();
-        match sender.send(message).await {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                todo!()
-            }
-        }
+    pub async fn send(
+        self_mutex: &Arc<Mutex<Self>>,
+        message: Mining<'static>,
+    ) -> Result<(), JdClientError> {
+        let sender = self_mutex
+            .safe_lock(|self_| self_.sender.clone())
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
+        sender
+            .send(message)
+            .await
+            .map_err(|_| JdClientError::Unrecoverable)
     }
 
     pub async fn on_new_template(
         self_mutex: &Arc<Mutex<Self>>,
         mut new_template: NewTemplate<'static>,
         pool_output: &[u8],
-    ) -> Result<(), Error> {
-        if !self_mutex.safe_lock(|s| s.status.have_channel()).unwrap() {
+    ) -> Result<(), JdClientError> {
+        if !self_mutex
+            .safe_lock(|s| s.status.have_channel())
+            .map_err(|e| Error::PoisonLock(e.to_string()))?
+        {
             super::IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
             return Ok(());
         }
         let mut pool_out = &pool_output[0..];
         let pool_output =
             TxOut::consensus_decode(&mut pool_out).expect("Upstream sent an invalid coinbase");
-        let to_send = self_mutex
-            .safe_lock(|s| {
-                let channel = s.status.get_channel();
-                channel.update_pool_outputs(vec![pool_output]);
-                // TODO TODO TODO if this fail just reinitialize the proxy
-                channel.on_new_template(&mut new_template)
-            })
-            .expect("Poison lock")?;
+
+        let to_send = {
+            let pool_outputs = self_mutex.safe_lock(|s| {
+                let channel = s.status.get_channel().map_err(JdClientError::RolesSv2Logic);
+
+                match channel {
+                    Ok(channel) => {
+                        channel.update_pool_outputs(vec![pool_output]);
+                        Ok(channel.on_new_template(&mut new_template).map_err(|e| {
+                            error!("{e:?}");
+                            ProxyState::update_downstream_state(DownstreamState::Down(
+                                DownstreamType::JdClientMiningDownstream,
+                            ));
+                        }))
+                    }
+                    Err(e) => Err(e),
+                }
+            });
+
+            pool_outputs.map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)??
+        }
+        .map_err(|_| JdClientError::Unrecoverable)?;
+
         // to_send is HashMap<channel_id, messages_to_send> but here we have only one downstream so
         // only one channel opened downstream. That means that we can take all the messages in the
         // map and send them downstream.
         let to_send = to_send.into_values();
         for message in to_send {
             let message = if let Mining::NewExtendedMiningJob(job) = message {
-                let jd = self_mutex.safe_lock(|s| s.jd.clone()).unwrap().unwrap();
+                let jd = self_mutex
+                    .safe_lock(|s| s.jd.clone())
+                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?
+                    .ok_or({
+                        // Propagate error. The caller will restart proxy
+                        JdClientError::JdMissing
+                    })?;
                 jd.safe_lock(|jd| jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone())
-                    .unwrap();
+                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
                 jd.safe_lock(|jd| jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone())
-                    .unwrap();
+                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
 
                 Mining::NewExtendedMiningJob(job)
             } else {
                 message
             };
-            Self::send(self_mutex, message).await.unwrap();
+            Self::send(self_mutex, message)
+                .await
+                .map_err(|_| Error::DownstreamDown)?; // Caller will restart proxy
         }
         // See coment on the definition of the global for memory
         // ordering
@@ -315,19 +395,30 @@ impl DownstreamMiningNode {
     pub async fn on_set_new_prev_hash(
         self_mutex: &Arc<Mutex<Self>>,
         new_prev_hash: roles_logic_sv2::template_distribution_sv2::SetNewPrevHash<'static>,
-    ) -> Result<(), Error> {
-        if !self_mutex.safe_lock(|s| s.status.have_channel()).unwrap() {
+    ) -> Result<(), JdClientError> {
+        if !self_mutex
+            .safe_lock(|s| s.status.have_channel())
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?
+        {
             return Ok(());
         }
         let job_id = self_mutex
             .safe_lock(|s| {
-                let channel = s.status.get_channel();
+                let channel = s.status.get_channel()?;
                 channel.on_new_prev_hash_from_tp(&new_prev_hash)
             })
-            .unwrap()?;
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)??;
+
         let channel_ids = self_mutex
-            .safe_lock(|s| s.status.get_channel().get_extended_channels_ids())
-            .unwrap();
+            .safe_lock(|s| {
+                s.status
+                    .get_channel()
+                    .map_err(|_| Error::NotFoundChannelId)
+                    .map(|channel| channel.get_extended_channels_ids())
+            })
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?
+            .map_err(|_| Error::NotFoundChannelId)?;
+
         let channel_id = match channel_ids.len() {
             1 => channel_ids[0],
             _ => unreachable!(),
@@ -340,7 +431,9 @@ impl DownstreamMiningNode {
             nbits: new_prev_hash.n_bits,
         };
         let message = Mining::SetNewPrevHash(to_send);
-        Self::send(self_mutex, message).await.unwrap();
+        Self::send(self_mutex, message)
+            .await
+            .map_err(|_| Error::DownstreamDown)?; // Caller will restart proxy
         Ok(())
     }
 }
@@ -387,7 +480,10 @@ impl
         if !self.status.is_solo_miner() {
             // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
             Ok(SendTo::RelaySameMessageToRemote(
-                self.status.get_upstream().unwrap(),
+                match self.status.get_upstream() {
+                    Some(upstream) => upstream,
+                    None => return Err(Error::NoUpstreamsConnected),
+                },
             ))
         } else {
             // The channel factory is created here so that we are sure that if we have a channel
@@ -415,18 +511,20 @@ impl
                 coinbase_outputs,
                 "SOLO".as_bytes().to_vec(),
             )
-            .expect("Signature + extranonce lens exceed 32 bytes");
+            .inspect_err(|_| {
+                error!("Signature + extranonce lens exceed 32 bytes");
+            })?;
 
             self.status.set_channel(channel_factory);
 
             let request_id = m.request_id;
             let hash_rate = m.nominal_hash_rate;
             let min_extranonce_size = m.min_extranonce_size;
-            let messages_res = self.status.get_channel().new_extended_channel(
-                request_id,
-                hash_rate,
-                min_extranonce_size,
-            );
+            let messages_res = self
+                .status
+                .get_channel()
+                .map_err(|_| Error::NotFoundChannelId)?
+                .new_extended_channel(request_id, hash_rate, min_extranonce_size);
             match messages_res {
                 Ok(messages) => {
                     let messages = messages.into_iter().map(SendTo::Respond).collect();
@@ -444,10 +542,13 @@ impl
         if !self.status.is_solo_miner() {
             // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
             Ok(SendTo::RelaySameMessageToRemote(
-                self.status.get_upstream().unwrap(),
+                self.status
+                    .get_upstream()
+                    .ok_or(Error::NoUpstreamsConnected)?,
             ))
         } else {
-            todo!()
+            error!("Solo Mining currently Unsupported");
+            std::process::exit(1)
         }
     }
 
@@ -465,6 +566,7 @@ impl
         match self
             .status
             .get_channel()
+            .map_err(|_| Error::NotFoundChannelId)?
             .on_submit_shares_extended(m.clone())?
         {
             OnNewShare::SendErrorDownstream(s) => {
@@ -504,16 +606,25 @@ impl
                             coinbase_tx: coinbase.try_into()?,
                         };
                         // The below channel should never be full is ok to block
-                        solution_sender.blocking_send(solution).unwrap();
+                        solution_sender
+                            .blocking_send(solution)
+                            .map_err(|_| Error::DownstreamDown)?; // Better Error to return here?
                         if !self.status.is_solo_miner() {
                             {
                                 let jd = self.jd.clone();
                                 let mut share = share.clone();
-                                share.extranonce = extranonce.try_into().unwrap();
+                                share.extranonce = extranonce.try_into()?;
                                 // This do not need to be put in a task manager it always return
                                 // fastly
                                 tokio::task::spawn(async move {
-                                    JobDeclarator::on_solution(&jd.unwrap(), share).await
+                                    if let Some(jd) = jd {
+                                        if let Err(e) = JobDeclarator::on_solution(&jd, share).await
+                                        {
+                                            error!("{e:?}");
+                                            // Set the proxy state to internal inconsistency
+                                            ProxyState::update_inconsistency(Some(1));
+                                        }
+                                    }
                                 });
                             }
                         }

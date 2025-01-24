@@ -30,6 +30,23 @@ pub enum Error {
     Uint256Conversion(ParseLengthError),
     Infallible(std::convert::Infallible),
     Unrecoverable,
+    TaskManagerFailed,
+    JdClientMutexCorrupted,
+
+    // jd_client/job_declarator specific errors
+    JobDeclaratorMutexCorrupted,
+    JobDeclaratorTaskManagerFailed,
+    // jd_client/mining_downstream specific errors
+    JdClientDownstreamMutexCorrupted,
+    JdClientDownstreamTaskManagerFailed,
+    // jd_client/mining_upstream specific errors
+    JdClientUpstreamMutexCorrupted,
+    JdClientUpstreamTaskManagerFailed,
+    JdMissing,
+    // template_receiver specific errors
+    TemplateRxMutexCorrupted,
+    TemplateRxTaskManagerFailed,
+    TpMissing,
 }
 
 impl fmt::Display for Error {
@@ -51,6 +68,32 @@ impl fmt::Display for Error {
             VecToSlice32(ref e) => write!(f, "Standard Error: `{:?}`", e),
             Infallible(ref e) => write!(f, "Infallible Error:`{:?}`", e),
             Unrecoverable => write!(f, "Unrecoverable Error"),
+            JdClientMutexCorrupted => write!(f, "JdClient mutex Corrupted"),
+            TaskManagerFailed => write!(f, "Failed to add Task in JdClient TaskManager"),
+
+            JobDeclaratorMutexCorrupted => write!(f, "Job Declarator mutex Corrupted"),
+            JobDeclaratorTaskManagerFailed => {
+                write!(f, "Failed to add Task in Job Declarator TaskManager")
+            }
+            JdMissing => write!(f, "Job declarator is None"),
+
+            JdClientDownstreamMutexCorrupted => {
+                write!(f, "JdClient Mining Downstream mutex Corrupted")
+            }
+            JdClientDownstreamTaskManagerFailed => write!(
+                f,
+                "Failed to add Task in JdClient Mining Downstream TaskManager"
+            ),
+            JdClientUpstreamMutexCorrupted => write!(f, "JdClient Mining Upstream mutex Corrupted"),
+            JdClientUpstreamTaskManagerFailed => write!(
+                f,
+                "Failed to add Task in JdClient Mining Upstream TaskManager"
+            ),
+            TemplateRxMutexCorrupted => write!(f, "TemplateRx mutex Corrupted"),
+            TemplateRxTaskManagerFailed => {
+                write!(f, "Failed to add Task in TemplateRx TaskManager")
+            }
+            TpMissing => write!(f, "Failed to connect to TP"),
         }
     }
 }

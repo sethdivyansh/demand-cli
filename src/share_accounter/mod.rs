@@ -1,6 +1,9 @@
+mod errors;
 mod task_manager;
 
+use errors::Error;
 use std::sync::Arc;
+use tracing::error;
 
 use dashmap::DashMap;
 use demand_share_accounting_ext::*;
@@ -8,29 +11,35 @@ use parser::{PoolExtMessages, ShareAccountingMessages};
 use roles_logic_sv2::{mining_sv2::SubmitSharesSuccess, parsers::Mining};
 use task_manager::TaskManager;
 
-use crate::shared::utils::AbortOnDrop;
+use crate::{
+    proxy_state::{ProxyState, ShareAccounterState},
+    shared::utils::AbortOnDrop,
+    PoolState,
+};
 
 pub async fn start(
     receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
     up_sender: tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
-) -> AbortOnDrop {
+) -> Result<AbortOnDrop, Error> {
     let task_manager = TaskManager::initialize();
     let shares_sent_up = Arc::new(DashMap::with_capacity(100));
     let abortable = task_manager
         .safe_lock(|t| t.get_aborter())
-        .unwrap()
-        .unwrap();
+        .map_err(|_| Error::ShareAccounterTaskManagerMutexCorrupted)?
+        .ok_or(Error::ShareAccounterTaskManagerError)?;
+
     let relay_up_task = relay_up(receiver, up_sender, shares_sent_up.clone());
     TaskManager::add_relay_up(task_manager.clone(), relay_up_task)
         .await
-        .expect("Task Manager failed");
+        .map_err(|_| Error::ShareAccounterTaskManagerError)?;
+
     let relay_down_task = relay_down(up_receiver, sender, shares_sent_up.clone());
     TaskManager::add_relay_down(task_manager.clone(), relay_down_task)
         .await
-        .expect("Task Manager failed");
-    abortable
+        .map_err(|_| Error::ShareAccounterTaskManagerError)?;
+    Ok(abortable)
 }
 
 struct ShareSentUp {
@@ -74,28 +83,43 @@ fn relay_down(
                 PoolExtMessages::ShareAccountingMessages(msg) => {
                     if let ShareAccountingMessages::ShareOk(msg) = msg {
                         let job_id_bytes = msg.ref_job_id.to_le_bytes();
-                        let job_id = u32::from_le_bytes(job_id_bytes[4..8].try_into().unwrap());
-                        let share_sent_up = shares_sent_up
-                            .remove(&job_id)
-                            .expect("Pool sent invalid share success")
-                            .1;
+                        let job_id = u32::from_le_bytes(job_id_bytes[4..8].try_into().expect("Internal error: job_id_bytes[4..8] can always be convertible into a u32"));
+                        let share_sent_up = match shares_sent_up.remove(&job_id) {
+                            Some(shares) => shares.1,
+                            // job_id doesn't exist
+                            None => {
+                                error!("Pool sent invalid share success");
+                                // Set global pool state to Down
+                                ProxyState::update_pool_state(PoolState::Down);
+                                return;
+                            }
+                        };
+
                         let success = Mining::SubmitSharesSuccess(SubmitSharesSuccess {
                             channel_id: share_sent_up.channel_id,
                             last_sequence_number: share_sent_up.sequence_number,
                             new_submits_accepted_count: 1,
                             new_shares_sum: 1,
                         });
-                        if sender.send(success).await.is_err() {
+                        if let Err(e) = sender.send(success).await {
+                            error!("{e:?}");
+                            ProxyState::update_share_accounter_state(ShareAccounterState::Down);
                             break;
                         }
                     };
                 }
                 PoolExtMessages::Mining(msg) => {
-                    if sender.send(msg).await.is_err() {
+                    if let Err(e) = sender.send(msg).await {
+                        error!("{e}");
+                        ProxyState::update_share_accounter_state(ShareAccounterState::Down);
                         break;
                     }
                 }
-                _ => panic!("Pool send unexpected message on mining connection"),
+                _ => {
+                    error!("Pool send unexpected message on mining connection");
+                    ProxyState::update_pool_state(PoolState::Down);
+                    break;
+                }
             }
         }
     });
