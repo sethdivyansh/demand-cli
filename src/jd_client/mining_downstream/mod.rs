@@ -186,25 +186,27 @@ impl DownstreamMiningNode {
         let is_solo_miner = self_mutex
             .safe_lock(|s| s.status.is_solo_miner())
             .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
-        let handle: task::JoinHandle<Result<(), JdClientError>> = tokio::task::spawn(async move {
+        let handle = tokio::task::spawn(async move {
             if !is_solo_miner {
                 // Safe unwrap already checked if it contains an upstream withe `is_solo_miner`
-                let upstream = self_mutex
-                    .safe_lock(|s| s.status.get_upstream())
-                    .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?
-                    .ok_or({
-                        error!("Upstream is None");
-                        JdClientError::Unrecoverable
-                    })?;
+                let upstream = match self_mutex.safe_lock(|s| s.status.get_upstream()) {
+                    Ok(upstream) => upstream.unwrap(),
+                    Err(_) => {
+                        error!("{}", JdClientError::JdClientDownstreamMutexCorrupted);
+                        return;
+                    }
+                };
                 if let Ok(factory) = UpstreamMiningNode::take_channel_factory(upstream).await {
-                    self_mutex
+                    if self_mutex
                         .safe_lock(|s| {
                             s.status.set_channel(factory);
                         })
-                        .map_err(|_| JdClientError::JdClientDownstreamTaskManagerFailed)?
+                        .is_err()
+                    {
+                        error!("{}", JdClientError::JdClientDownstreamTaskManagerFailed);
+                    }
                 }
             }
-            Ok(())
         });
         Ok(handle.into())
     }

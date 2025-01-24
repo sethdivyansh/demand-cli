@@ -116,7 +116,6 @@ impl Downstream {
             last_notify: last_notify.clone(),
         }));
 
-        // TODO handle error
         if let Err(e) = start_receive_downstream(
             task_manager.clone(),
             downstream.clone(),
@@ -131,7 +130,6 @@ impl Downstream {
             ));
         };
 
-        // TODO handle error
         if let Err(e) = start_send_to_downstream(
             task_manager.clone(),
             receiver_outgoing,
@@ -224,7 +222,6 @@ impl Downstream {
                     Ok(())
                 }
             }
-            // TODO
             Err(e) => {
                 error!("{e}");
                 Err(Error::V1Protocol(e))
@@ -240,8 +237,9 @@ impl Downstream {
     ) {
         let sender = match self_.safe_lock(|s| s.tx_outgoing.clone()) {
             Ok(sender) => sender,
-            Err(_) => {
+            Err(e) => {
                 // Poisoned mutex
+                error!("{e}");
                 ProxyState::update_downstream_state(DownstreamState::Down(
                     DownstreamType::TranslatorDownstream,
                 ));

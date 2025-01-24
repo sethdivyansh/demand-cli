@@ -223,17 +223,13 @@ impl Upstream {
                 loop {
                     if let Err(e) = Self::try_update_hashrate(self_.clone()).await {
                         error!("Failed to update hashrate: {e:?}");
-                        // Update global upstream state to down
-                        // ProxyState::update_upstream_state(UpstreamState::Down(
-                        //     UpstreamType::TranslatorUpstream,
-                        // ));
                         return;
                     };
                 }
             })
         };
 
-        let main_loop_handle: task::JoinHandle<Result<(), Error<'static>>> = {
+        let main_loop_handle = {
             let self_ = self_.clone();
             task::spawn(async move {
                 while let Some(m) = receiver.recv().await {
@@ -255,7 +251,7 @@ impl Upstream {
                             // Relay the response message to the Upstream role
                             if tx_frame.send(message_for_upstream).await.is_err() {
                                 error!("Failed to send message to upstream role");
-                                return Err(Error::AsyncChannelError);
+                                return;
                             };
                         }
                         // Does not send the messages anywhere, but instead handle them internally
@@ -264,12 +260,16 @@ impl Upstream {
                                 Mining::OpenExtendedMiningChannelSuccess(m) => {
                                     let prefix_len = m.extranonce_prefix.len();
                                     // update upstream_extranonce1_size for tracking
-                                    let miner_extranonce2_size = self_
-                                        .safe_lock(|u| {
-                                            u.upstream_extranonce1_size = prefix_len;
-                                            u.min_extranonce_size as usize
-                                        })
-                                        .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
+                                    let miner_extranonce2_size = match self_.safe_lock(|u| {
+                                        u.upstream_extranonce1_size = prefix_len;
+                                        u.min_extranonce_size as usize
+                                    }) {
+                                        Ok(extranounce2_size) => extranounce2_size,
+                                        Err(e) => {
+                                            error!("Translator upstream mutex poisoned: {e}");
+                                            return;
+                                        }
+                                    };
                                     let extranonce_prefix: Extranonce = m.extranonce_prefix.into();
                                     // Create the extended extranonce that will be saved in bridge and
                                     // it will be used to open downstream (sv1) channels
@@ -305,26 +305,27 @@ impl Upstream {
                                         .is_err()
                                     {
                                         error!("Failed to send extended extranounce");
-                                        return Err(Error::AsyncChannelError);
+                                        return;
                                     };
                                 }
                                 Mining::NewExtendedMiningJob(m) => {
                                     let job_id = m.job_id;
 
-                                    self_
-                                        .safe_lock(|s| {
-                                            let _ = s.job_id.insert(job_id);
-                                        })
-                                        .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
+                                    if let Err(e) = self_.safe_lock(|s| {
+                                        let _ = s.job_id.insert(job_id);
+                                    }) {
+                                        error!("Translator upstream mutex poisoned: {e}");
+                                        return;
+                                    };
                                     if tx_sv2_new_ext_mining_job.send(m).await.is_err() {
                                         error!("Failed to send NewExtendedMiningJob");
-                                        return Err(Error::AsyncChannelError);
+                                        return;
                                     };
                                 }
                                 Mining::SetNewPrevHash(m) => {
                                     if tx_sv2_set_new_prev_hash.send(m).await.is_err() {
                                         error!("Failed to send SetNewPrevHash");
-                                        return Err(Error::AsyncChannelError);
+                                        return;
                                     };
                                 }
                                 Mining::CloseChannel(_m) => {
@@ -345,21 +346,18 @@ impl Upstream {
                         Ok(SendTo::None(None)) => (),
                         Ok(_) => panic!(),
                         Err(e) => {
-                            return Err(Error::RolesSv2Logic(e));
+                            error!("{}", Error::RolesSv2Logic(e));
+                            return;
                         }
                     }
                 }
                 error!("Failed to receive message");
-                Err(Error::Unrecoverable)
             })
         };
         Ok((diff_manager_handle.into(), main_loop_handle.into()))
     }
     #[allow(clippy::result_large_err)]
-    fn get_job_id(
-        self_: &Arc<Mutex<Self>>,
-    ) -> Result<Result<u32, super::super::error::Error<'static>>, super::super::error::Error<'static>>
-    {
+    fn get_job_id(self_: &Arc<Mutex<Self>>) -> Result<u32, super::super::error::Error<'static>> {
         self_
             .safe_lock(|s| {
                 if s.is_work_selection_enabled() {
@@ -373,7 +371,7 @@ impl Upstream {
                     ))
                 }
             })
-            .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)
+            .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?
     }
 
     fn handle_submit(
@@ -384,7 +382,7 @@ impl Upstream {
             .safe_lock(|s| s.sender.clone())
             .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
 
-        let handle: task::JoinHandle<Result<(), Error<'static>>> = {
+        let handle = {
             let self_ = self_.clone();
             task::spawn(async move {
                 loop {
@@ -392,28 +390,42 @@ impl Upstream {
                         Some(msg) => msg,
                         None => {
                             error!("Failed to receive SubmitShare message");
-                            return Err(Error::Unrecoverable);
+                            return;
                         }
                     };
 
-                    let channel_id = self_
-                        .safe_lock(|s| {
-                            s.channel_id
-                                .ok_or(Error::RolesSv2Logic(RolesLogicError::NotFoundChannelId))
-                        })
-                        .map_err(|_| Error::TranslatorUpstreamMutexPoisoned);
+                    let channel_id = match self_.safe_lock(|s| s.channel_id) {
+                        Ok(Some(channel_id)) => channel_id,
+                        Ok(None) => {
+                            error!(
+                                "{}",
+                                Error::RolesSv2Logic(RolesLogicError::NotFoundChannelId)
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            error!("Translator upstream mutex corrupted: {e}");
+                            return;
+                        }
+                    };
 
-                    sv2_submit.channel_id = channel_id??;
+                    sv2_submit.channel_id = channel_id;
 
-                    let job_id = Self::get_job_id(&self_);
-                    sv2_submit.job_id = job_id??;
+                    let job_id = match Self::get_job_id(&self_) {
+                        Ok(job_id) => job_id,
+                        Err(e) => {
+                            error!("{e}");
+                            return;
+                        }
+                    };
+                    sv2_submit.job_id = job_id;
 
                     let message =
                         roles_logic_sv2::parsers::Mining::SubmitSharesExtended(sv2_submit);
 
                     if tx_frame.send(message).await.is_err() {
                         error!("Unable to send SubmitSharesExtended msg upstream");
-                        return Err(Error::AsyncChannelError);
+                        return;
                     };
                 }
             })

@@ -118,16 +118,23 @@ async fn start_update(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
 ) -> Result<(), Error<'static>> {
-    let handle: task::JoinHandle<Result<(), Error<'static>>> = task::spawn(async move {
+    let handle = task::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-            let ln = downstream
-                .safe_lock(|d| d.last_notify.clone())
-                .map_err(|_| Error::TranslatorDownstreamMutexPoisoned)?;
+            let ln = match downstream.safe_lock(|d| d.last_notify.clone()) {
+                Ok(ln) => ln,
+                Err(e) => {
+                    error!("{e}");
+                    return;
+                }
+            };
             assert!(ln.is_some());
             // if hashrate has changed, update difficulty management, and send new
             // mining.set_difficulty
-            Downstream::try_update_difficulty_settings(&downstream, ln).await?;
+            if let Err(e) = Downstream::try_update_difficulty_settings(&downstream, ln).await {
+                error!("{e}");
+                return;
+            };
         }
     });
     TaskManager::add_update(task_manager, handle.into())

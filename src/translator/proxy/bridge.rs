@@ -203,6 +203,7 @@ impl Bridge {
                         if let Err(e) = Self::handle_submit_shares(self_.clone(), share).await {
                             error!("Failed to handle SubmitShareWithChannelId: {e}");
                             ProxyState::update_translator_state(TranslatorState::Down);
+                            break;
                         }
                     }
                     DownstreamMessages::SetDownstreamTarget(new_target) => {

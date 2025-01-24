@@ -14,7 +14,6 @@ pub enum Error<'a> {
     TranslatorUpstreamMutexPoisoned,
     TranslatorDiffConfigMutexPoisoned,
     TranslatorTaskManagerMutexPoisoned,
-    TranslatorDownstreamMutexPoisoned,
     BridgeMutexPoisoned,
     BridgeTaskManagerMutexPoisoned,
     // Task Manager Errors
@@ -54,9 +53,6 @@ impl fmt::Display for Error<'_> {
             }
             Error::TranslatorTaskManagerMutexPoisoned => {
                 write!(f, "TranslatorTaskManagerMutexPoisoned")
-            }
-            Error::TranslatorDownstreamMutexPoisoned => {
-                write!(f, "TranslatorDownstreamMutexPoisoned")
             }
             Error::BridgeMutexPoisoned => write!(f, "BridgeMutexPoisoned"),
             Error::BridgeTaskManagerMutexPoisoned => write!(f, "BridgeTaskManagerMutexPoisoned"),

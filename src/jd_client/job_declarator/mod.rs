@@ -440,12 +440,16 @@ impl JobDeclarator {
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
         let task = tokio::task::spawn(async move {
             let id = set_new_prev_hash.template_id;
-            self_mutex
+            if self_mutex
                 .safe_lock(|s| {
                     s.last_set_new_prev_hash = Some(set_new_prev_hash.clone());
                     s.set_new_prev_hash_counter += 1;
                 })
-                .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
+                .is_err()
+            {
+                error!("{}", Error::JobDeclaratorMutexCorrupted);
+                return;
+            };
             let (job, up, merkle_path, template, mut pool_outs) = loop {
                 match self_mutex.safe_lock(|s| {
                     if s.set_new_prev_hash_counter > 1
@@ -467,19 +471,24 @@ impl JobDeclarator {
                     Ok(Some(Some(future_job_tuple))) => break future_job_tuple,
                     Ok(Some(None)) => {
                         // No future jobs
-                        return Err(Error::RolesSv2Logic(
-                            roles_logic_sv2::errors::Error::NoFutureJobs,
-                        ));
+                        error!(
+                            "{}",
+                            Error::RolesSv2Logic(roles_logic_sv2::errors::Error::NoFutureJobs,)
+                        );
+                        return;
                     }
                     Ok(None) => {}
-                    Err(_) => return Err(Error::JobDeclaratorMutexCorrupted),
+                    Err(_) => {
+                        error!("{}", Error::JobDeclaratorMutexCorrupted);
+                        return;
+                    }
                 };
                 tokio::task::yield_now().await;
             };
             let signed_token = job.mining_job_token.clone();
             let mut template_outs = template.coinbase_tx_outputs.to_vec();
             pool_outs.append(&mut template_outs);
-            Upstream::set_custom_jobs(
+            if let Err(e) = Upstream::set_custom_jobs(
                 &up,
                 job,
                 set_new_prev_hash,
@@ -494,6 +503,9 @@ impl JobDeclarator {
                 template.template_id,
             )
             .await
+            {
+                error!("Failed to set custom jobs: {e}");
+            }
         });
         TaskManager::add_allocate_tokens(task_manager, task.into())
             .await

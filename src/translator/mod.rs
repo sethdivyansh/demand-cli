@@ -16,7 +16,10 @@ use tokio::sync::mpsc::channel;
 use sv1_api::server_to_client;
 use tokio::sync::broadcast;
 
-use crate::shared::utils::AbortOnDrop;
+use crate::{
+    proxy_state::{ProxyState, TranslatorState},
+    shared::utils::AbortOnDrop,
+};
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 
 use self::upstream::diff_management::UpstreamDifficultyConfig;
@@ -112,13 +115,19 @@ pub async fn start(
                 Some((extended_extranonce, up_id)) => (extended_extranonce, up_id),
                 None => {
                     error!("Failed to receive from rx_sv2_extranonce");
-                    // Set Translator global state to Down here later
-                    return Err(Error::Unrecoverable);
+                    ProxyState::update_translator_state(TranslatorState::Down);
+                    return;
                 }
             };
 
             loop {
-                let target: [u8; 32] =  target.safe_lock(|t| t.clone()).map_err(|e| Error::TargetError(roles_logic_sv2::Error::PoisonLock(e.to_string())))?.try_into().expect("Internal error: this operation cannot fail because the target Vec<u8> can always be converted into [u8; 32]");
+                let target: [u8; 32] =  match target.safe_lock(|t| t.clone()) {
+                    Ok(target) => target.try_into().expect("Internal error: this operation cannot fail because Vec<u8> can always be converted into [u8; 32]"),
+                    Err(e) => {
+                        error!("{}", Error::TargetError(roles_logic_sv2::Error::PoisonLock(e.to_string())));
+                        break
+                    }
+                };
 
                 if target != [0; 32] {
                     break;
@@ -127,39 +136,65 @@ pub async fn start(
             }
 
             // Instantiate a new `Bridge` and begins handling incoming messages
-            let b = proxy::Bridge::new(
+            let b = match proxy::Bridge::new(
                 tx_sv2_submit_shares_ext,
                 tx_sv1_notify.clone(),
                 extended_extranonce,
                 target,
                 up_id,
-            )?;
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("Failed to instantiate new Bridge: {e}");
+                    return;
+                }
+            };
 
-            let bridge_aborter = proxy::Bridge::start(
+            let bridge_aborter = match proxy::Bridge::start(
                 b.clone(),
                 rx_sv2_set_new_prev_hash,
                 rx_sv2_new_ext_mining_job,
                 rx_sv1_bridge,
             )
-            .await?;
+            .await
+            {
+                Ok(abortable) => abortable,
+                Err(e) => {
+                    error!("Failed to start bridge: {e}");
+                    return;
+                }
+            };
 
-            let downstream_aborter = downstream::Downstream::accept_connections(
+            let downstream_aborter = match downstream::Downstream::accept_connections(
                 tx_sv1_bridge,
                 tx_sv1_notify,
                 b,
                 diff_config,
                 downstreams,
             )
-            .await?;
+            .await
+            {
+                Ok(abortable) => abortable,
+                Err(e) => {
+                    error!("Downstream failed to accept connection: {e}");
+                    return;
+                }
+            };
 
-            TaskManager::add_bridge(task_manager.clone(), bridge_aborter)
+            if TaskManager::add_bridge(task_manager.clone(), bridge_aborter)
                 .await
-                .map_err(|_| Error::TranslatorTaskManagerFailed)?;
+                .is_err()
+            {
+                error!("{}", Error::TranslatorTaskManagerFailed);
+                return;
+            };
 
-            TaskManager::add_downstream_listener(task_manager.clone(), downstream_aborter)
+            if TaskManager::add_downstream_listener(task_manager.clone(), downstream_aborter)
                 .await
-                .map_err(|_| Error::TranslatorTaskManagerFailed)?;
-            Ok(())
+                .is_err()
+            {
+                error!("{}", Error::TranslatorTaskManagerFailed);
+            }
         })
     };
     TaskManager::add_startup_task(task_manager.clone(), startup_task.into())

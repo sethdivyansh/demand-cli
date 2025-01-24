@@ -16,7 +16,7 @@ pub async fn start_receive_downstream(
     mut recv_from_down: mpsc::Receiver<String>,
     connection_id: u32,
 ) -> Result<(), Error<'static>> {
-    let handle: task::JoinHandle<Result<(), Error<'static>>> = task::spawn(async move {
+    let handle = task::spawn(async move {
         while let Some(incoming) = recv_from_down.recv().await {
             let incoming: Result<json_rpc::Message, _> = serde_json::from_str(&incoming);
             if let Ok(incoming) = incoming {
@@ -40,9 +40,11 @@ pub async fn start_receive_downstream(
                 };
             } else {
                 // Message received could not be converted to rpc message
-                return Err(Error::V1Protocol(
-                    sv1_api::error::Error::InvalidJsonRpcMessageKind,
-                ));
+                error!(
+                    "{}",
+                    Error::V1Protocol(sv1_api::error::Error::InvalidJsonRpcMessageKind,)
+                );
+                return;
             }
         }
         // No message to receive
@@ -50,7 +52,6 @@ pub async fn start_receive_downstream(
             "Downstream: Shutting down sv1 downstream reader {}",
             connection_id
         );
-        Err(Error::Unrecoverable)
     });
     TaskManager::add_receive_downstream(task_manager, handle.into())
         .await

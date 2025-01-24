@@ -75,13 +75,11 @@ impl Downstream {
             .safe_lock(|d| (d.difficulty_mgmt.clone(), d.connection_id))
             .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
-        let prev_target = match hash_rate_to_target(
+        let prev_target = hash_rate_to_target(
             down_diff_config.estimated_downstream_hash_rate.into(),
             down_diff_config.shares_per_minute.into(),
-        ) {
-            Ok(target) => Ok(target),
-            Err(v) => Err(Error::TargetError(v)),
-        }?;
+        )
+        .map_err(Error::TargetError)?;
 
         if let Some(estimated_hash_rate) = Self::update_downstream_hashrate(self_, prev_target)? {
             let estimated_hash_rate =
@@ -237,7 +235,7 @@ impl Downstream {
                 Ok(Some(new_estimation as f32))
             }
         } else if realized_share_per_min.is_sign_negative() {
-            error!("realized_share_per_min should not be negative"); //? check panic!() or not
+            error!("realized_share_per_min should not be negative");
             return Err(Error::Unrecoverable);
         } else {
             let new_estimation = hash_rate_from_target(miner_target, realized_share_per_min)?;

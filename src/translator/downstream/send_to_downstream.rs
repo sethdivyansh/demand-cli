@@ -14,7 +14,7 @@ pub async fn start_send_to_downstream(
     connection_id: u32,
     host: String,
 ) -> Result<(), Error<'static>> {
-    let handle: task::JoinHandle<Result<(), Error<'static>>> = task::spawn(async move {
+    let handle = task::spawn(async move {
         while let Some(res) = receiver_outgoing.recv().await {
             let to_send = match serde_json::to_string(&res) {
                 Ok(string) => format!("{}\n", string),
@@ -32,7 +32,6 @@ pub async fn start_send_to_downstream(
             "Downstream: Shutting down sv1 downstream writer: {}",
             connection_id
         );
-        Err(Error::Unrecoverable)
     });
     TaskManager::add_send_downstream(task_manager, handle.into())
         .await
