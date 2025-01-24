@@ -20,7 +20,7 @@ use super::{
     task_manager::TaskManager,
 };
 use crate::{
-    proxy_state::{ProxyState, TranslatorState, UpstreamState, UpstreamType},
+    proxy_state::{ProxyState, TranslatorState, UpstreamType},
     shared::utils::AbortOnDrop,
 };
 use roles_logic_sv2::{channel_logic::channel_factory::OnNewShare, Error as RolesLogicError};
@@ -193,7 +193,7 @@ impl Bridge {
                     Some(msg) => msg,
                     None => {
                         error!("Failed to receive message from downstream");
-                        ProxyState::update_translator_state(TranslatorState::Down);
+                        ProxyState::update_translator_state(TranslatorState::Down).await;
                         break;
                     }
                 };
@@ -202,7 +202,7 @@ impl Bridge {
                     DownstreamMessages::SubmitShares(share) => {
                         if let Err(e) = Self::handle_submit_shares(self_.clone(), share).await {
                             error!("Failed to handle SubmitShareWithChannelId: {e}");
-                            ProxyState::update_translator_state(TranslatorState::Down);
+                            ProxyState::update_translator_state(TranslatorState::Down).await;
                             break;
                         }
                     }
@@ -211,7 +211,7 @@ impl Bridge {
                             Self::handle_update_downstream_target(self_.clone(), new_target)
                         {
                             error!("Failed to handle SetDownstreamTarget: {e}");
-                            ProxyState::update_translator_state(TranslatorState::Down);
+                            ProxyState::update_translator_state(TranslatorState::Down).await;
                             break;
                         };
                     }
@@ -392,7 +392,7 @@ impl Bridge {
                 if tx_sv1_notify.send(notify.clone()).is_err() {
                     error!("Failed to send mining.notify");
                     // Update translator state to down
-                    ProxyState::update_translator_state(TranslatorState::Down);
+                    ProxyState::update_translator_state(TranslatorState::Down).await;
                 };
                 match_a_future_job = true;
                 self_
@@ -432,7 +432,7 @@ impl Bridge {
                         Some(set_new_prev_hash) => set_new_prev_hash,
                         None => {
                             error!("Failed to receive SetNewPrevHash");
-                            ProxyState::update_translator_state(TranslatorState::Down);
+                            ProxyState::update_translator_state(TranslatorState::Down).await;
                             break;
                         }
                     };
@@ -448,9 +448,7 @@ impl Bridge {
                 .await
                 {
                     error!("Failed to handle SetNewPrevHash: {e}");
-                    ProxyState::update_upstream_state(UpstreamState::Down(
-                        UpstreamType::TranslatorUpstream,
-                    ));
+                    ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream).await;
                     return;
                 }
             }
@@ -543,7 +541,7 @@ impl Bridge {
                         Some(sv2_new_extended_mining_job) => sv2_new_extended_mining_job,
                         None => {
                             error!("Failed to receive NewExtendedMiningJob from upstream");
-                            ProxyState::update_translator_state(TranslatorState::Down);
+                            ProxyState::update_translator_state(TranslatorState::Down).await;
                             break;
                         }
                     };
@@ -559,7 +557,7 @@ impl Bridge {
                 .await
                 {
                     error!("Failed to handle NewExtendedMiningJob {e}",);
-                    ProxyState::update_translator_state(TranslatorState::Down);
+                    ProxyState::update_translator_state(TranslatorState::Down).await;
                 };
                 super::super::upstream::upstream::IS_NEW_JOB_HANDLED
                     .store(true, std::sync::atomic::Ordering::SeqCst);

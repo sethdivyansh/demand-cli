@@ -1,6 +1,6 @@
 mod task_manager;
 use crate::{
-    proxy_state::{DownstreamState, DownstreamType, JdState, ProxyState},
+    proxy_state::{DownstreamType, JdState, ProxyState},
     shared::utils::AbortOnDrop,
 };
 use tokio::time::{timeout, Duration};
@@ -167,10 +167,8 @@ impl DownstreamMiningNode {
             while let Some(message) = receiver.recv().await {
                 if let Err(e) = DownstreamMiningNode::next(&self_mutex, message).await {
                     error!("{e:?}");
-                    //update global downstream state to down
-                    ProxyState::update_downstream_state(DownstreamState::Down(
-                        DownstreamType::JdClientMiningDownstream,
-                    ));
+                    ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream)
+                        .await;
                 };
             }
         });
@@ -240,7 +238,7 @@ impl DownstreamMiningNode {
                     Some(incoming) => incoming,
                     None => {
                         error!("JDC dowstream try to releay an inexistent message");
-                        ProxyState::update_jd_state(JdState::Down);
+                        ProxyState::update_jd_state(JdState::Down).await;
                         return Err(JdClientError::Unrecoverable);
                     }
                 };
@@ -293,9 +291,10 @@ impl DownstreamMiningNode {
                     if let Err(e) = Self::match_send_to(self_mutex.clone(), Ok(message), None).await
                     {
                         error!("{e:?}");
-                        ProxyState::update_downstream_state(DownstreamState::Down(
+                        ProxyState::update_downstream_state(
                             DownstreamType::JdClientMiningDownstream,
-                        ));
+                        )
+                        .await;
                     }
                 }
             }
@@ -339,26 +338,24 @@ impl DownstreamMiningNode {
             TxOut::consensus_decode(&mut pool_out).expect("Upstream sent an invalid coinbase");
 
         let to_send = {
-            let pool_outputs = self_mutex.safe_lock(|s| {
-                let channel = s.status.get_channel().map_err(JdClientError::RolesSv2Logic);
+            let pool_outputs = self_mutex
+                .safe_lock(|s| {
+                    let channel = s.status.get_channel().map_err(JdClientError::RolesSv2Logic);
 
-                match channel {
-                    Ok(channel) => {
-                        channel.update_pool_outputs(vec![pool_output]);
-                        Ok(channel.on_new_template(&mut new_template).map_err(|e| {
-                            error!("{e:?}");
-                            ProxyState::update_downstream_state(DownstreamState::Down(
-                                DownstreamType::JdClientMiningDownstream,
-                            ));
-                        }))
+                    match channel {
+                        Ok(channel) => {
+                            channel.update_pool_outputs(vec![pool_output]);
+                            match channel.on_new_template(&mut new_template) {
+                                Ok(pool_outputs) => Ok(pool_outputs),
+                                Err(e) => Err(JdClientError::RolesSv2Logic(e)),
+                            }
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
-                }
-            });
-
-            pool_outputs.map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)??
-        }
-        .map_err(|_| JdClientError::Unrecoverable)?;
+                })
+                .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
+            pool_outputs?
+        };
 
         // to_send is HashMap<channel_id, messages_to_send> but here we have only one downstream so
         // only one channel opened downstream. That means that we can take all the messages in the
@@ -622,7 +619,7 @@ impl
                                         {
                                             error!("{e:?}");
                                             // Set the proxy state to internal inconsistency
-                                            ProxyState::update_inconsistency(Some(1));
+                                            ProxyState::update_inconsistency(Some(1)).await;
                                         }
                                     }
                                 });

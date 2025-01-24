@@ -115,7 +115,7 @@ pub async fn start(
                 Some((extended_extranonce, up_id)) => (extended_extranonce, up_id),
                 None => {
                     error!("Failed to receive from rx_sv2_extranonce");
-                    ProxyState::update_translator_state(TranslatorState::Down);
+                    ProxyState::update_translator_state(TranslatorState::Down).await;
                     return;
                 }
             };

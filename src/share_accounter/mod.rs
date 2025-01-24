@@ -90,7 +90,7 @@ fn relay_down(
                             None => {
                                 error!("Pool sent invalid share success");
                                 // Set global pool state to Down
-                                ProxyState::update_pool_state(PoolState::Down);
+                                ProxyState::update_pool_state(PoolState::Down).await;
                                 return;
                             }
                         };
@@ -103,7 +103,8 @@ fn relay_down(
                         });
                         if let Err(e) = sender.send(success).await {
                             error!("{e:?}");
-                            ProxyState::update_share_accounter_state(ShareAccounterState::Down);
+                            ProxyState::update_share_accounter_state(ShareAccounterState::Down)
+                                .await;
                             break;
                         }
                     };
@@ -111,13 +112,13 @@ fn relay_down(
                 PoolExtMessages::Mining(msg) => {
                     if let Err(e) = sender.send(msg).await {
                         error!("{e}");
-                        ProxyState::update_share_accounter_state(ShareAccounterState::Down);
+                        ProxyState::update_share_accounter_state(ShareAccounterState::Down).await;
                         break;
                     }
                 }
                 _ => {
                     error!("Pool send unexpected message on mining connection");
-                    ProxyState::update_pool_state(PoolState::Down);
+                    ProxyState::update_pool_state(PoolState::Down).await;
                     break;
                 }
             }

@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
+use roles_logic_sv2::utils::Mutex;
 use tracing::{error, info};
 
-use crate::PROXY_STATE;
+static mut PROXY_STATE: Option<Arc<Mutex<ProxyState>>> = None;
 
 /// Main enum representing the overall state of the proxy
 #[derive(Debug, Clone, PartialEq)]
@@ -54,14 +57,14 @@ pub enum ShareAccounterState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DownstreamState {
     Up,
-    Down(DownstreamType), // A specific downstream is down
+    Down(Vec<DownstreamType>), // A specific downstream is down
 }
 
 /// Represents the state of the Upstream
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpstreamState {
     Up,
-    Down(UpstreamType), // A specific upstream is down
+    Down(Vec<UpstreamType>), // A specific upstream is down
 }
 
 /// Represents different downstreams
@@ -92,7 +95,44 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
-    /// Creates a new ProxyState with all states set to "Up"
+    pub fn init() {
+        unsafe {
+            PROXY_STATE = Some(Arc::new(Mutex::new(ProxyState::new())));
+        }
+    }
+
+    async fn get_inner() -> Arc<Mutex<ProxyState>> {
+        loop {
+            unsafe {
+                if let Some(ps) = PROXY_STATE.as_ref() {
+                    return ps.clone();
+                } else {
+                    error!("Global Proxy is None reinitializing...");
+                    PROXY_STATE = Some(Arc::new(Mutex::new(ProxyState::new_down())));
+                };
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    fn get_inner_sync() -> Arc<Mutex<ProxyState>> {
+        loop {
+            unsafe {
+                if let Some(ps) = PROXY_STATE.as_ref() {
+                    return ps.clone();
+                } else {
+                    error!("Global Proxy is None reinitializing...");
+                    PROXY_STATE = Some(Arc::new(Mutex::new(ProxyState::new_down())));
+                };
+                std::thread::yield_now();
+            }
+        }
+    }
+    fn reinitialize() {
+        unsafe {
+            PROXY_STATE = Some(Arc::new(Mutex::new(ProxyState::new_down())));
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             pool: PoolState::Up,
@@ -105,11 +145,23 @@ impl ProxyState {
             upstream: UpstreamState::Up,
         }
     }
+    pub fn new_down() -> Self {
+        Self {
+            pool: PoolState::Down,
+            tp: TpState::Down,
+            jd: JdState::Down,
+            share_accounter: ShareAccounterState::Down,
+            translator: TranslatorState::Down,
+            inconsistency: None,
+            downstream: DownstreamState::Down(vec![]),
+            upstream: UpstreamState::Down(vec![]),
+        }
+    }
 
-    ///  Function to update pool state
-    pub fn update_pool_state(pool_state: PoolState) {
+    pub async fn update_pool_state(pool_state: PoolState) {
         info!("Updating PoolState state to {:?}", pool_state);
-        if PROXY_STATE
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
                 state.pool = pool_state;
                 // // state.update_proxy_state();
@@ -117,106 +169,150 @@ impl ProxyState {
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to update TP state
-    pub fn update_tp_state(tp_state: TpState) {
+    pub async fn update_tp_state(tp_state: TpState) {
         info!("Updating TpState state to {:?}", tp_state);
-        if PROXY_STATE
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
                 state.tp = tp_state;
             })
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
+        }
+    }
+    pub fn update_tp_state_sync(tp_state: TpState) {
+        info!("Updating TpState state to {:?}", tp_state);
+        if Self::get_inner_sync()
+            .safe_lock(|state| {
+                state.tp = tp_state;
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to update Jd state
-    pub fn update_jd_state(jd_state: JdState) {
+    pub async fn update_jd_state(jd_state: JdState) {
         info!("Updating JdState state to {:?}", jd_state);
-        if PROXY_STATE
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
                 state.jd = jd_state;
             })
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
+        }
+    }
+    pub fn update_jd_state_sync(jd_state: JdState) {
+        info!("Updating JdState state to {:?}", jd_state);
+        if Self::get_inner_sync()
+            .safe_lock(|state| {
+                state.jd = jd_state;
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to update Translator state
-    pub fn update_translator_state(translator_state: TranslatorState) {
+    pub async fn update_translator_state(translator_state: TranslatorState) {
         info!("Updating Translator state to {:?}", translator_state);
-        if PROXY_STATE
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
                 state.translator = translator_state;
             })
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to update ShareAccounter state
-    pub fn update_share_accounter_state(share_accounter_state: ShareAccounterState) {
+    pub async fn update_share_accounter_state(share_accounter_state: ShareAccounterState) {
         info!(
             "Updating ShareAccounterState state to {:?}",
             share_accounter_state
         );
-        if PROXY_STATE
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
                 state.share_accounter = share_accounter_state;
             })
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to update inconsistency
-    pub fn update_inconsistency(code: Option<u32>) {
+    pub async fn update_inconsistency(code: Option<u32>) {
         info!("Updating Internal Inconsistency state to {:?}", code);
-        if PROXY_STATE
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
                 state.inconsistency = code;
             })
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to update a downstream state
-    pub fn update_downstream_state(downstream_state: DownstreamState) {
-        info!("Updating Downstream state to {:?}", downstream_state);
-        if PROXY_STATE
+    pub async fn update_downstream_state(downstream_type: DownstreamType) {
+        info!("Updating Downstream state to {:?}", downstream_type);
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
-                state.downstream = downstream_state;
+                state.downstream = DownstreamState::Down(vec![downstream_type]);
             })
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
-
-    /// Function to update a downstream state
-    pub fn update_upstream_state(upstream_state: UpstreamState) {
-        info!("Updating Upstream state to {:?}", upstream_state);
-        if PROXY_STATE
+    pub fn update_downstream_state_sync(downstream_type: DownstreamType) {
+        info!("Updating Downstream state to {:?}", downstream_type);
+        if Self::get_inner_sync()
             .safe_lock(|state| {
-                state.upstream = upstream_state;
+                state.downstream = DownstreamState::Down(vec![downstream_type]);
             })
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to update a the global state to Up
-    pub fn update_proxy_state_up() {
-        if PROXY_STATE
+    pub async fn update_upstream_state(upstream_type: UpstreamType) {
+        info!("Updating Upstream state to {:?}", upstream_type);
+        if Self::get_inner()
+            .await
+            .safe_lock(|state| {
+                state.upstream = UpstreamState::Down(vec![upstream_type]);
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
+        }
+    }
+
+    pub async fn update_proxy_state_up() {
+        if Self::get_inner()
+            .await
             .safe_lock(|state| {
                 state.pool = PoolState::Up;
                 state.jd = JdState::Up;
@@ -230,13 +326,13 @@ impl ProxyState {
             .is_err()
         {
             error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
         }
     }
 
-    /// Function to check if any state is down and identifies which one
-    pub fn is_proxy_down(&self) -> (bool, Option<String>) {
-        let errors = self.get_errors();
-        if errors.is_empty() {
+    pub async fn is_proxy_down() -> (bool, Option<String>) {
+        let errors = Self::get_errors().await;
+        if errors.is_ok() && errors.as_ref().unwrap().is_empty() {
             (false, None)
         } else {
             let error_descriptions: Vec<String> =
@@ -245,34 +341,43 @@ impl ProxyState {
         }
     }
 
-    pub fn get_errors(&self) -> Vec<ProxyStates> {
+    pub async fn get_errors() -> Result<Vec<ProxyStates>, ()> {
         let mut errors = Vec::new();
-
-        if self.pool == PoolState::Down {
-            errors.push(ProxyStates::Pool(self.pool));
+        if Self::get_inner()
+            .await
+            .safe_lock(|state| {
+                if state.pool == PoolState::Down {
+                    errors.push(ProxyStates::Pool(state.pool));
+                }
+                if state.tp == TpState::Down {
+                    errors.push(ProxyStates::Tp(state.tp));
+                }
+                if state.jd == JdState::Down {
+                    errors.push(ProxyStates::Jd(state.jd));
+                }
+                if state.share_accounter == ShareAccounterState::Down {
+                    errors.push(ProxyStates::ShareAccounter(state.share_accounter));
+                }
+                if state.translator == TranslatorState::Down {
+                    errors.push(ProxyStates::Translator(state.translator));
+                }
+                if let Some(inconsistency) = state.inconsistency {
+                    errors.push(ProxyStates::InternalInconsistency(inconsistency));
+                }
+                if matches!(state.downstream, DownstreamState::Down(_)) {
+                    errors.push(ProxyStates::Downstream(state.downstream.clone()));
+                }
+                if matches!(state.upstream, UpstreamState::Down(_)) {
+                    errors.push(ProxyStates::Upstream(state.upstream.clone()));
+                }
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            Self::reinitialize();
+            Err(())
+        } else {
+            Ok(errors)
         }
-        if self.tp == TpState::Down {
-            errors.push(ProxyStates::Tp(self.tp));
-        }
-        if self.jd == JdState::Down {
-            errors.push(ProxyStates::Jd(self.jd));
-        }
-        if self.share_accounter == ShareAccounterState::Down {
-            errors.push(ProxyStates::ShareAccounter(self.share_accounter));
-        }
-        if self.translator == TranslatorState::Down {
-            errors.push(ProxyStates::Translator(self.translator));
-        }
-        if let Some(inconsistency) = self.inconsistency {
-            errors.push(ProxyStates::InternalInconsistency(inconsistency));
-        }
-        if matches!(self.downstream, DownstreamState::Down(_)) {
-            errors.push(ProxyStates::Downstream(self.downstream.clone()));
-        }
-        if matches!(self.upstream, UpstreamState::Down(_)) {
-            errors.push(ProxyStates::Upstream(self.upstream.clone()));
-        }
-
-        errors
     }
 }

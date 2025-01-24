@@ -38,7 +38,7 @@ use tracing::{error, info};
 ///    between all the contexts is not necessary.
 pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 
-use crate::proxy_state::{DownstreamState, DownstreamType, ProxyState, TpState};
+use crate::proxy_state::{DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -146,9 +146,7 @@ async fn initialize_jd(
         Ok(abortable) => abortable,
         Err(e) => {
             error!("Can not start downstream mining node: {e}");
-            ProxyState::update_downstream_state(DownstreamState::Down(
-                DownstreamType::JdClientMiningDownstream,
-            ));
+            ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream).await;
             return None;
         }
     };
@@ -257,7 +255,7 @@ async fn retry_connection(address: String) {
             // This force the proxy to restart. If we use Up the proxy just ignore it.
             // So updating it to Down and setting the TP_ADDRESS to Some(address) will make the
             // proxy restart with TP, the the TpState will be set to Up.
-            ProxyState::update_tp_state(TpState::Down);
+            ProxyState::update_tp_state(TpState::Down).await;
             break;
         }
     }

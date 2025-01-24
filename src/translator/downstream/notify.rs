@@ -1,4 +1,4 @@
-use crate::proxy_state::{DownstreamState, DownstreamType, ProxyState};
+use crate::proxy_state::{DownstreamType, ProxyState};
 use crate::translator::downstream::SUBSCRIBE_TIMEOUT_SECS;
 use crate::translator::error::Error;
 
@@ -29,9 +29,9 @@ pub async fn start_notify(
                     Ok(is_a) => is_a,
                     Err(e) => {
                         error!("{e}");
-                        ProxyState::update_downstream_state(DownstreamState::Down(
+                        ProxyState::update_downstream_state_sync(
                             DownstreamType::TranslatorDownstream,
-                        ));
+                        );
                         break;
                     }
                 };
@@ -44,9 +44,10 @@ pub async fn start_notify(
                         Some(sv1_mining_notify_msg) => sv1_mining_notify_msg,
                         None => {
                             error!("sv1_mining_notify_msg is None");
-                            ProxyState::update_downstream_state(DownstreamState::Down(
+                            ProxyState::update_downstream_state(
                                 DownstreamType::TranslatorDownstream,
-                            ));
+                            )
+                            .await;
                             break;
                         }
                     };
@@ -60,9 +61,8 @@ pub async fn start_notify(
                         .is_err()
                     {
                         error!("Translator Downstream Mutex Poisoned");
-                        ProxyState::update_downstream_state(DownstreamState::Down(
-                            DownstreamType::TranslatorDownstream,
-                        ));
+                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream)
+                            .await;
                         break;
                     }
                     first_sent = true;
@@ -78,9 +78,10 @@ pub async fn start_notify(
                             .is_err()
                         {
                             error!("Translator Downstream Mutex Poisoned");
-                            ProxyState::update_downstream_state(DownstreamState::Down(
+                            ProxyState::update_downstream_state(
                                 DownstreamType::TranslatorDownstream,
-                            ));
+                            )
+                            .await;
                             break;
                         }
 

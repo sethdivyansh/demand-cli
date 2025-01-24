@@ -1,5 +1,5 @@
 mod task_manager;
-use crate::proxy_state::{DownstreamState, DownstreamType, JdState, TpState};
+use crate::proxy_state::{DownstreamType, JdState, TpState};
 use crate::shared::utils::AbortOnDrop;
 use crate::{
     jd_client::mining_downstream::DownstreamMiningNode as Downstream, proxy_state::ProxyState,
@@ -133,14 +133,14 @@ impl TemplateRx {
             Err(e) => {
                 // Update global tp state to down
                 error!("{e}");
-                ProxyState::update_tp_state(TpState::Down);
+                ProxyState::update_tp_state_sync(TpState::Down);
                 return;
             }
         };
         if sender_to_tp.send(either_frame).await.is_err() {
             error!("Failed to send msg to tp");
             // Update global tp state to down
-            ProxyState::update_tp_state(TpState::Down);
+            ProxyState::update_tp_state(TpState::Down).await;
         }
     }
 
@@ -219,7 +219,7 @@ impl TemplateRx {
                             Ok(jd) => jd,
                             Err(_) => {
                                 error!("Job declarator mutex poisoned!");
-                                ProxyState::update_jd_state(JdState::Down);
+                                ProxyState::update_jd_state_sync(JdState::Down);
                                 break;
                             }
                         };
@@ -250,7 +250,7 @@ impl TemplateRx {
                                     None => {
                                         error!("Msg header not found");
                                         // Update global tp state to down
-                                        ProxyState::update_tp_state(TpState::Down);
+                                        ProxyState::update_tp_state(TpState::Down).await;
                                         break;
                                     }
                                 };
@@ -284,7 +284,8 @@ impl TemplateRx {
                                                 {
                                                     error!("TemplateRx Mutex is corrupt");
                                                     // Update global tp state to down
-                                                    ProxyState::update_tp_state(TpState::Down);
+                                                    ProxyState::update_tp_state(TpState::Down)
+                                                        .await;
                                                     break;
                                                 };
 
@@ -303,7 +304,10 @@ impl TemplateRx {
                                                 {
                                                     error!("{e:?}");
                                                     // Update global downstream state to down
-                                                    ProxyState::update_downstream_state(DownstreamState::Down(DownstreamType::JdClientMiningDownstream));
+                                                    ProxyState::update_downstream_state(
+                                                        DownstreamType::JdClientMiningDownstream,
+                                                    )
+                                                    .await;
                                                 };
                                             }
                                             Some(TemplateDistribution::SetNewPrevHash(m)) => {
@@ -322,7 +326,7 @@ impl TemplateRx {
                                                 m.clone(),
                                             ).await {
                                                 error!("{e:?}");
-                                                ProxyState::update_jd_state(JdState::Down); break;
+                                                ProxyState::update_jd_state(JdState::Down).await; break;
                                             };
                                                 }
                                                 if let Err(e) =
@@ -330,7 +334,8 @@ impl TemplateRx {
                                                 {
                                                     error!("SetNewPrevHash Error: {e:?}");
                                                     // Update global tp state to down
-                                                    ProxyState::update_tp_state(TpState::Down);
+                                                    ProxyState::update_tp_state(TpState::Down)
+                                                        .await;
                                                     break;
                                                 };
                                             }
@@ -353,7 +358,9 @@ impl TemplateRx {
                                                     Err(e) => {
                                                         // Update global tp state to down
                                                         error!("TemplateRx mutex poisoned: {e}");
-                                                        ProxyState::update_tp_state(TpState::Down);
+                                                        ProxyState::update_tp_state_sync(
+                                                            TpState::Down,
+                                                        );
                                                         break;
                                                     }
                                                 };
@@ -419,13 +426,13 @@ impl TemplateRx {
                             } else {
                                 error!("Failed to covert TP message to StdFrame");
                                 // Update global tp state to down
-                                ProxyState::update_tp_state(TpState::Down);
+                                ProxyState::update_tp_state(TpState::Down).await;
                             }
                         }
 
                         None => {
                             error!("Failed to receive msg");
-                            ProxyState::update_tp_state(TpState::Down);
+                            ProxyState::update_tp_state(TpState::Down).await;
                             break;
                         }
                     };
@@ -439,10 +446,11 @@ impl TemplateRx {
         while let Some(solution) = rx.recv().await {
             let test_only = match self_.safe_lock(|s| s.test_only_do_not_send_solution_to_tp) {
                 Ok(test_only) => test_only,
-                Err(_) => {
+                Err(e) => {
+                    error!("{e:?}");
                     // TemplateRx mutex poisoned
                     // Update global tp state to down
-                    ProxyState::update_tp_state(TpState::Down);
+                    ProxyState::update_tp_state_sync(TpState::Down);
                     return;
                 }
             };
