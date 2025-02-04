@@ -1,6 +1,6 @@
 pub mod message_handler;
 mod task_manager;
-use binary_sv2::{Seq0255, Seq064K, Sv2DataType, B016M, B064K, U256};
+use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
 use bitcoin::{util::psbt::serialize::Deserialize, Transaction};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use demand_sv2_connection::noise_connection_tokio::Connection;
@@ -82,6 +82,7 @@ impl JobDeclarator {
         address: SocketAddr,
         authority_public_key: [u8; 32],
         up: Arc<Mutex<Upstream>>,
+        should_log_when_connected: bool,
     ) -> Result<(Arc<Mutex<Self>>, AbortOnDrop), Error> {
         let stream = tokio::net::TcpStream::connect(address).await?;
         let initiator = Initiator::from_raw_k(authority_public_key)?;
@@ -92,7 +93,9 @@ impl JobDeclarator {
 
         SetupConnectionHandler::setup(&mut receiver, &mut sender, address).await?;
 
-        info!("JD CONNECTED");
+        if should_log_when_connected {
+            info!("JD CONNECTED");
+        }
 
         let min_extranonce_size = crate::MIN_EXTRANONCE_SIZE;
 
@@ -226,15 +229,21 @@ impl JobDeclarator {
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
         let mut tx_list: Vec<Transaction> = Vec::new();
+        let mut tx_ids = vec![];
         for tx in tx_list_.to_vec() {
             match Transaction::deserialize(&tx) {
-                Ok(tx) => tx_list.push(tx),
+                Ok(tx) => {
+                    let id: U256 = tx.txid().to_vec().try_into().unwrap();
+                    tx_list.push(tx);
+                    tx_ids.push(id);
+                }
                 Err(_) => {
                     error!("Failed to deserailize transaction");
                     return Err(Error::Unrecoverable);
                 }
             }
         }
+        let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
 
         let coinbase_prefix = self_mutex
             .safe_lock(|s| s.coinbase_tx_prefix.clone())
@@ -244,32 +253,13 @@ impl JobDeclarator {
             .safe_lock(|s| s.coinbase_tx_suffix.clone())
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
-        let tx_list_seq064k = if let Some(inner) = Some(tx_list_.clone().into_inner()) {
-            let inner_vec = inner
-                .into_iter()
-                .map(|item| {
-                    let item_vec = item.to_vec();
-                    U256::from_vec_(item_vec)
-                        .expect("Internal Error: Transactions not in the expected format ")
-                })
-                .collect();
-
-            match Seq064K::new(inner_vec) {
-                Ok(seq) => seq,
-                Err(e) => return Err(Error::BinarySv2(e))?,
-            }
-        } else {
-            error!("tx_list_seq064k error");
-            return Err(Error::Unrecoverable);
-        };
-
         let declare_job = DeclareMiningJob {
             request_id: id,
             mining_job_token: token.try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into Inner"),
             version: template.version,
             coinbase_prefix,
             coinbase_suffix,
-            tx_list: tx_list_seq064k,
+            tx_list: tx_ids,
             excess_data, // request transaction data
         };
         let last_declare = LastDeclareJob {

@@ -85,7 +85,7 @@ async fn initialize_jd(
         Ok(upstream) => upstream,
         Err(e) => {
             error!("Failed to instantiate new Upstream: {e}");
-            drop(abortable); // drop all tasks initailzed upto this point
+            drop(abortable);
             return None;
         }
     };
@@ -96,7 +96,7 @@ async fn initialize_jd(
             .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present"),
         Err(e) => {
             error!("TP_ADDRESS mutex corrupted: {e}");
-            drop(abortable); // drop all tasks initailzed upto this point
+            drop(abortable);
             return None;
         }
     };
@@ -112,11 +112,11 @@ async fn initialize_jd(
         .next()?;
 
     let (jd, jd_abortable) =
-        match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone()).await {
+        match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true).await {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to intialize Jd: {e}");
-                drop(abortable); // drop all tasks initailzed upto this point
+                drop(abortable);
                 return None;
             }
         };
@@ -125,8 +125,11 @@ async fn initialize_jd(
         .await
         .is_err()
     {
-        error!("{}", error::Error::TaskManagerFailed);
-        drop(abortable); // drop all tasks initailzed upto this point
+        error!(
+            "Task manager failed while trying to add job declarator task{}",
+            error::Error::TaskManagerFailed
+        );
+        drop(abortable);
         return None;
     };
 
@@ -142,7 +145,7 @@ async fn initialize_jd(
     {
         Ok(abortable) => abortable,
         Err(e) => {
-            error!("{e}");
+            error!("Can not start downstream mining node: {e}");
             ProxyState::update_downstream_state(DownstreamState::Down(
                 DownstreamType::JdClientMiningDownstream,
             ));
@@ -153,8 +156,11 @@ async fn initialize_jd(
         .await
         .is_err()
     {
-        error!("{}", error::Error::TaskManagerFailed);
-        drop(abortable); // drop all tasks initailzed upto this point
+        error!(
+            "Task manager failed while trying to add mining downstream task{}",
+            error::Error::TaskManagerFailed
+        );
+        drop(abortable);
         return None;
     };
     if upstream
@@ -180,7 +186,10 @@ async fn initialize_jd(
         .await
         .is_err()
     {
-        error!("{}", error::Error::TaskManagerFailed);
+        error!(
+            "Task manager failed while trying to add mining upstream task{}",
+            error::Error::TaskManagerFailed
+        );
         drop(abortable); // drop all tasks initailzed upto this point
         return None;
     };
@@ -200,14 +209,14 @@ async fn initialize_jd(
         Ok(abortable) => abortable,
         Err(_) => {
             info!("Dropping jd abortable");
-            drop(abortable); // drop all tasks initailzed upto this point
-                             //temporaily set TP_ADDRESS to None so that proxy can restart without it.
-                             // that means we will start mining without jd
+            eprintln!("TP is unreachable, the proxy is in not in JD mode");
+            drop(abortable);
+            // Temporaily set TP_ADDRESS to None so that proxy can restart without it.
+            // that means we will start mining without jd
             if crate::TP_ADDRESS.safe_lock(|tp| *tp = None).is_err() {
                 error!("TP_ADDRESS mutex corrupt");
                 return None;
             };
-            // spawn a task to keep trying the connection
             tokio::spawn(retry_connection(tp_address));
             return None;
         }
@@ -217,18 +226,21 @@ async fn initialize_jd(
         .await
         .is_err()
     {
-        error!("{}", error::Error::TaskManagerFailed);
-        drop(abortable); // drop all tasks initailzed upto this point
+        error!(
+            "Task manager failed while trying to add template receiver task{}",
+            error::Error::TaskManagerFailed
+        );
+        drop(abortable);
         return None;
     };
     Some(abortable)
 }
 
-// // Used when tp is down or connection was unsuccessful to retry connection.
+// Used when tp is down or connection was unsuccessful to retry connection.
 async fn retry_connection(address: String) {
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5)); // Retry every 5 seconds
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
     loop {
-        // info!("Retrying connection....");           //might bloat log
+        info!("TP Retrying connection....");
         interval.tick().await;
         if tokio::net::TcpStream::connect(address.clone())
             .await
@@ -240,10 +252,13 @@ async fn retry_connection(address: String) {
                 .is_err()
             {
                 error!("TP_ADDRESS Mutex failed");
-                return;
+                std::process::exit(1);
             };
+            // This force the proxy to restart. If we use Up the proxy just ignore it.
+            // So updating it to Down and setting the TP_ADDRESS to Some(address) will make the
+            // proxy restart with TP, the the TpState will be set to Up.
             ProxyState::update_tp_state(TpState::Down);
-            return;
+            break;
         }
     }
 }
