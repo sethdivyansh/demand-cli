@@ -251,7 +251,7 @@ impl DownstreamMiningNode {
                 let upstream_mutex = self_mutex
                     .safe_lock(|s| s.status.get_upstream())
                     .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?
-                    .ok_or({
+                    .ok_or_else(|| {
                         error!("Upstream is None Here");
                         JdClientError::Unrecoverable
                     })?;

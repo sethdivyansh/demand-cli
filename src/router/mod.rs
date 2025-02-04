@@ -370,6 +370,7 @@ impl PoolLatency {
                         address,
                         authority_public_key.into_bytes(),
                         upstream,
+                        false,
                     )
                     .await
                     {

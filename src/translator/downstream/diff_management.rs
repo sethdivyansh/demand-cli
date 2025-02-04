@@ -166,7 +166,7 @@ impl Downstream {
             let diff = pdiff.div(target);
             diff.low_u64() as f64
         } else {
-            0.001
+            0.01
         }
     }
 
