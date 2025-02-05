@@ -231,7 +231,7 @@ impl Upstream {
                         None => {
                             error!("Upstream down");
                             // Update the proxy state to reflect the Tp is down
-                            ProxyState::update_tp_state(TpState::Down).await;
+                            ProxyState::update_tp_state(TpState::Down);
                             break;
                         }
                     };
@@ -257,8 +257,7 @@ impl Upstream {
                                 // Update global proxy downstream state
                                 ProxyState::update_downstream_state(
                                     DownstreamType::JdClientMiningDownstream,
-                                )
-                                .await;
+                                );
                                 break;
                             };
                         }
@@ -266,8 +265,7 @@ impl Upstream {
                         Ok(_) => unreachable!(),
                         Err(e) => {
                             error!("{e:?}");
-                            ProxyState::update_upstream_state(UpstreamType::JDCMiningUpstream)
-                                .await;
+                            ProxyState::update_upstream_state(UpstreamType::JDCMiningUpstream);
                             break;
                         }
                     }

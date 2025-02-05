@@ -29,9 +29,7 @@ pub async fn start_notify(
                     Ok(is_a) => is_a,
                     Err(e) => {
                         error!("{e}");
-                        ProxyState::update_downstream_state_sync(
-                            DownstreamType::TranslatorDownstream,
-                        );
+                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                         break;
                     }
                 };
@@ -46,8 +44,7 @@ pub async fn start_notify(
                             error!("sv1_mining_notify_msg is None");
                             ProxyState::update_downstream_state(
                                 DownstreamType::TranslatorDownstream,
-                            )
-                            .await;
+                            );
                             break;
                         }
                     };
@@ -61,8 +58,7 @@ pub async fn start_notify(
                         .is_err()
                     {
                         error!("Translator Downstream Mutex Poisoned");
-                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream)
-                            .await;
+                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                         break;
                     }
                     first_sent = true;
@@ -80,8 +76,7 @@ pub async fn start_notify(
                             error!("Translator Downstream Mutex Poisoned");
                             ProxyState::update_downstream_state(
                                 DownstreamType::TranslatorDownstream,
-                            )
-                            .await;
+                            );
                             break;
                         }
 

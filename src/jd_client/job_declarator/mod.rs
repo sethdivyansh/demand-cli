@@ -298,7 +298,7 @@ impl JobDeclarator {
                     }),
                     None => {
                         error!("Failed to receive msg from Pool");
-                        ProxyState::update_pool_state(PoolState::Down).await;
+                        ProxyState::update_pool_state(PoolState::Down);
                         break;
                     }
                 };
@@ -324,7 +324,7 @@ impl JobDeclarator {
                                 Ok(last_declare) => last_declare,
                                 Err(e) => {
                                     error!("{e}");
-                                    ProxyState::update_jd_state(JdState::Down).await;
+                                    ProxyState::update_jd_state(JdState::Down);
                                     break;
                                 }
                             };
@@ -351,7 +351,7 @@ impl JobDeclarator {
                                 );
                             }) {
                                 error!("{e}");
-                                ProxyState::update_jd_state_sync(JdState::Down);
+                                ProxyState::update_jd_state(JdState::Down);
                                 break;
                             };
                         } else {
@@ -360,7 +360,7 @@ impl JobDeclarator {
                                     Ok(set_new_prev_hash) => set_new_prev_hash,
                                     Err(e) => {
                                         error!("{e}");
-                                        ProxyState::update_jd_state_sync(JdState::Down);
+                                        ProxyState::update_jd_state(JdState::Down);
                                         break;
                                     }
                                 };
@@ -381,7 +381,7 @@ impl JobDeclarator {
                                     pool_outs,
                                     template.coinbase_tx_locktime,
                                     template.template_id
-                                    ).await {error!("Failed to set custom jobd: {e}"); ProxyState::update_jd_state(JdState::Down).await;break;},
+                                    ).await {error!("Failed to set custom jobd: {e}"); ProxyState::update_jd_state(JdState::Down);break;},
                                 None => panic!("Invalid state we received a NewTemplate not future, without having received a set new prev hash")
                             }
                         }
@@ -398,20 +398,20 @@ impl JobDeclarator {
                             Ok(sender) => sender,
                             Err(e) => {
                                 error!("{e}");
-                                ProxyState::update_jd_state_sync(JdState::Down);
+                                ProxyState::update_jd_state(JdState::Down);
                                 break;
                             }
                         };
                         if sender.send(sv2_frame.into()).await.is_err() {
                             error!("Job declarator failed to send message");
-                            ProxyState::update_jd_state(JdState::Down).await;
+                            ProxyState::update_jd_state(JdState::Down);
                             break;
                         };
                     }
                     Ok(_) => unreachable!(),
                     Err(e) => {
                         error!("{e}");
-                        ProxyState::update_jd_state(JdState::Down).await;
+                        ProxyState::update_jd_state(JdState::Down);
                         break;
                     }
                 }
@@ -514,7 +514,7 @@ impl JobDeclarator {
                 Err(e) => {
                     error!("{e}");
                     //Poison lock
-                    ProxyState::update_jd_state_sync(JdState::Down);
+                    ProxyState::update_jd_state(JdState::Down);
                     return;
                 }
             };
@@ -526,7 +526,7 @@ impl JobDeclarator {
 
             if sender.send(frame.into()).await.is_err() {
                 error!("Job declarator failed to send message");
-                ProxyState::update_jd_state(JdState::Down).await;
+                ProxyState::update_jd_state(JdState::Down);
             }
         }
     }

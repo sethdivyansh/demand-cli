@@ -166,9 +166,8 @@ impl DownstreamMiningNode {
         let main_task = task::spawn(async move {
             while let Some(message) = receiver.recv().await {
                 if let Err(e) = DownstreamMiningNode::next(&self_mutex, message).await {
-                    error!("{e:?}");
-                    ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream)
-                        .await;
+                    error!("Jd error can not receive message from downstream: {e:?}");
+                    ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
                 };
             }
         });
@@ -188,9 +187,21 @@ impl DownstreamMiningNode {
             if !is_solo_miner {
                 // Safe unwrap already checked if it contains an upstream withe `is_solo_miner`
                 let upstream = match self_mutex.safe_lock(|s| s.status.get_upstream()) {
-                    Ok(upstream) => upstream.unwrap(),
-                    Err(_) => {
-                        error!("{}", JdClientError::JdClientDownstreamMutexCorrupted);
+                    Ok(upstream) => match upstream {
+                        Some(upstream) => upstream,
+                        None => {
+                            error!("Jd can not get upstream");
+                            ProxyState::update_downstream_state(
+                                DownstreamType::JdClientMiningDownstream,
+                            );
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        error!("Jd can not get upstream: {e}");
+                        ProxyState::update_downstream_state(
+                            DownstreamType::JdClientMiningDownstream,
+                        );
                         return;
                     }
                 };
@@ -201,7 +212,7 @@ impl DownstreamMiningNode {
                         })
                         .is_err()
                     {
-                        error!("{}", JdClientError::JdClientDownstreamTaskManagerFailed);
+                        error!("Jd can not get channel factory");
                     }
                 }
             }
@@ -238,7 +249,7 @@ impl DownstreamMiningNode {
                     Some(incoming) => incoming,
                     None => {
                         error!("JDC dowstream try to releay an inexistent message");
-                        ProxyState::update_jd_state(JdState::Down).await;
+                        ProxyState::update_jd_state(JdState::Down);
                         return Err(JdClientError::Unrecoverable);
                     }
                 };
@@ -264,7 +275,10 @@ impl DownstreamMiningNode {
                 //?check
                 let job_id = timeout(Duration::from_secs(10), job_id_future)
                     .await
-                    .map_err(|_| JdClientError::Unrecoverable)??;
+                    .map_err(|_| {
+                        error!("Timeout getting job_id for last_template_id: {last_template_id}");
+                        JdClientError::Unrecoverable
+                    })??;
                 share.job_id = job_id;
                 debug!(
                     "Sending valid block solution upstream, with job_id {}",
@@ -290,11 +304,10 @@ impl DownstreamMiningNode {
                 for message in messages {
                     if let Err(e) = Self::match_send_to(self_mutex.clone(), Ok(message), None).await
                     {
-                        error!("{e:?}");
+                        error!("Jd Unexpected message: {e:?}");
                         ProxyState::update_downstream_state(
                             DownstreamType::JdClientMiningDownstream,
-                        )
-                        .await;
+                        );
                     }
                 }
             }
@@ -617,9 +630,9 @@ impl
                                     if let Some(jd) = jd {
                                         if let Err(e) = JobDeclarator::on_solution(&jd, share).await
                                         {
-                                            error!("{e:?}");
+                                            error!("Jd Error on solution: {e:?}");
                                             // Set the proxy state to internal inconsistency
-                                            ProxyState::update_inconsistency(Some(1)).await;
+                                            ProxyState::update_inconsistency(Some(1));
                                         }
                                     }
                                 });

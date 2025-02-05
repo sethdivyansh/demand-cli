@@ -9,11 +9,7 @@ use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use std::{
-    net::ToSocketAddrs,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{net::ToSocketAddrs, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info};
 
@@ -30,16 +26,15 @@ const TRANSLATOR_BUFFER_SIZE: usize = 32;
 const MIN_EXTRANONCE_SIZE: u16 = 6;
 const MIN_EXTRANONCE2_SIZE: u16 = 5;
 const UPSTREAM_EXTRANONCE1_SIZE: usize = 15;
-const EXPECTED_SV1_HASHPOWER: f32 = 100_000_000_000.0;
+const EXPECTED_SV1_HASHPOWER: f32 = 100_000_000_000_000.0;
 //const EXPECTED_SV1_HASHPOWER: f32 = 1_000_0.0;
 const SHARE_PER_MIN: f32 = 10.0;
 const CHANNEL_DIFF_UPDTATE_INTERVAL: u32 = 10;
-const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 1_000_000_000_000.0;
+const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 10_000_000_000_000.0;
 //const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 1_000_0.0;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
+const POOL_ADDRESS: &str = "mining.dmnd.work:2000";
 //const POOL_ADDRESS: &str = "127.0.0.1:20000";
-const POOL_ADDRESS: &str = "k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000";
-//const POOL_ADDRESS: &str = "0.0.0.0:20000";
 //const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
 const AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 //const TP_ADDRESS: &str = "127.0.0.1:8442";
@@ -52,9 +47,6 @@ lazy_static! {
 lazy_static! {
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(std::env::var("TP_ADDRESS").ok());
-}
-lazy_static! {
-    static ref PROXY_STATE: Arc<Mutex<ProxyState>> = Arc::new(Mutex::new(ProxyState::new()));
 }
 
 #[tokio::main]
@@ -69,7 +61,6 @@ async fn main() {
         ))
         .init();
     std::env::var("TOKEN").expect("Missing TOKEN environment variable");
-    ProxyState::init();
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
     let address = POOL_ADDRESS
         .to_socket_addrs()
@@ -120,8 +111,8 @@ async fn initialize_proxy(
             Err(e) => {
                 error!("Impossible to initialize translator: {e}");
                 // Impossible to start the proxy so we restart proxy
-                ProxyState::update_translator_state(TranslatorState::Down).await;
-                ProxyState::update_tp_state(TpState::Down).await;
+                ProxyState::update_translator_state(TranslatorState::Down);
+                ProxyState::update_tp_state(TpState::Down);
                 return;
             }
         };
@@ -152,7 +143,7 @@ async fn initialize_proxy(
             )
             .await;
             if jdc_abortable.is_none() {
-                ProxyState::update_tp_state(TpState::Down).await;
+                ProxyState::update_tp_state(TpState::Down);
             };
             share_accounter_abortable = match share_accounter::start(
                 from_jdc_to_share_accounter_recv,
@@ -200,12 +191,12 @@ async fn initialize_proxy(
 
         match monitor(router, abort_handles, epsilon).await {
             Reconnect::NewUpstream(new_pool_addr) => {
-                ProxyState::update_proxy_state_up().await;
+                ProxyState::update_proxy_state_up();
                 pool_addr = Some(new_pool_addr);
                 continue;
             }
             Reconnect::NoUpstream => {
-                ProxyState::update_proxy_state_up().await;
+                ProxyState::update_proxy_state_up();
                 pool_addr = None;
                 continue;
             }
@@ -218,14 +209,18 @@ async fn monitor(
     abort_handles: Vec<(AbortOnDrop, std::string::String)>,
     epsilon: Duration,
 ) -> Reconnect {
-    //let mut interval = tokio::time::interval(time::Duration::from_secs(10));
+    let mut should_check_upstreams_latency = 0;
     loop {
-        if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
-            info!("Faster upstream detected. Reinitializing proxy...");
-            drop(abort_handles);
-            // Needs a little to time to drop
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            return Reconnect::NewUpstream(new_upstream);
+        // Check if a better upstream exist every 100 seconds
+        if should_check_upstreams_latency == 10 * 100 {
+            should_check_upstreams_latency = 0;
+            if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
+                info!("Faster upstream detected. Reinitializing proxy...");
+                drop(abort_handles);
+                // Needs a little to time to drop
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                return Reconnect::NewUpstream(new_upstream);
+            }
         }
 
         // Monitor finished tasks
@@ -239,7 +234,7 @@ async fn monitor(
             }
 
             // Check if the proxy state is down, and if so, reinitialize the proxy.
-            let is_proxy_down = ProxyState::is_proxy_down().await;
+            let is_proxy_down = ProxyState::is_proxy_down();
             if is_proxy_down.0 {
                 error!(
                     "Status: {:?}. Reinitializing proxy...",
@@ -252,7 +247,7 @@ async fn monitor(
         }
 
         // Check if the proxy state is down, and if so, reinitialize the proxy.
-        let is_proxy_down = ProxyState::is_proxy_down().await;
+        let is_proxy_down = ProxyState::is_proxy_down();
         if is_proxy_down.0 {
             error!(
                 "{:?} is DOWN. Reinitializing proxy...",
@@ -263,7 +258,8 @@ async fn monitor(
             return Reconnect::NoUpstream;
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        should_check_upstreams_latency += 1;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 }
 

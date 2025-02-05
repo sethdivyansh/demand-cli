@@ -146,7 +146,7 @@ async fn initialize_jd(
         Ok(abortable) => abortable,
         Err(e) => {
             error!("Can not start downstream mining node: {e}");
-            ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream).await;
+            ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
             return None;
         }
     };
@@ -255,7 +255,7 @@ async fn retry_connection(address: String) {
             // This force the proxy to restart. If we use Up the proxy just ignore it.
             // So updating it to Down and setting the TP_ADDRESS to Some(address) will make the
             // proxy restart with TP, the the TpState will be set to Up.
-            ProxyState::update_tp_state(TpState::Down).await;
+            ProxyState::update_tp_state(TpState::Down);
             break;
         }
     }

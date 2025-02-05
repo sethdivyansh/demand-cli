@@ -114,7 +114,7 @@ pub fn relay_up(
                 let either_frame: EitherFrame = std_frame.into();
                 if send.send(either_frame).await.is_err() {
                     error!("Mining upstream failed");
-                    ProxyState::update_pool_state(PoolState::Down).await;
+                    ProxyState::update_pool_state(PoolState::Down);
                     break;
                 };
             } else {
@@ -145,7 +145,7 @@ pub fn relay_down(
                             error!("Internal Mining downstream not available");
 
                             // Update Proxy state to reflect Internal inconsistency
-                            ProxyState::update_inconsistency(Some(1)).await;
+                            ProxyState::update_inconsistency(Some(1));
                         }
                     } else {
                         error!("Mining Upstream send non Mining message. Disconnecting");
@@ -161,7 +161,7 @@ pub fn relay_down(
             }
         }
         error!("Failed to receive msg from Pool");
-        ProxyState::update_pool_state(PoolState::Down).await;
+        ProxyState::update_pool_state(PoolState::Down);
     });
     task.into()
 }

@@ -294,7 +294,7 @@ impl Upstream {
                                                 error!(
                                                     "Failed to create a valid extended extranonce from {:?} {:?} {:?} {:?}: {:?}",
                                                     extranonce_prefix, range_0, range_1, range_2, e
-                                                ); ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream).await;
+                                                ); ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
                                                 break;
                                             }
                                         };

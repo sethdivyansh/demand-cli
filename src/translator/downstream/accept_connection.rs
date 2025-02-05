@@ -70,8 +70,7 @@ pub async fn start_accept_connection(
                     }
                     Err(e) => {
                         error!("{e:?}");
-                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream)
-                            .await;
+                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                         break;
                     }
                 }

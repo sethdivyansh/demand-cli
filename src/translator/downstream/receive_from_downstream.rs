@@ -34,7 +34,7 @@ pub async fn start_receive_downstream(
                     Downstream::handle_incoming_sv1(downstream.clone(), incoming).await
                 {
                     error!("Failed to handle incoming sv1 msg: {:?}", error);
-                    ProxyState::update_downstream_state_sync(DownstreamType::TranslatorDownstream);
+                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 };
             } else {
                 // Message received could not be converted to rpc message
