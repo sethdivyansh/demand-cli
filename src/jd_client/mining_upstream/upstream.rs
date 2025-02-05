@@ -1,6 +1,4 @@
-use crate::proxy_state::{
-    DownstreamState, DownstreamType, ProxyState, TpState, UpstreamState, UpstreamType,
-};
+use crate::proxy_state::{DownstreamType, ProxyState, TpState, UpstreamType};
 use crate::{jd_client::error::Error, jd_client::error::ProxyResult, shared::utils::AbortOnDrop};
 
 use crate::jd_client::mining_downstream::DownstreamMiningNode as Downstream;
@@ -257,9 +255,9 @@ impl Upstream {
                             if Downstream::send(&downstream_mutex, incoming).await.is_err() {
                                 error!("Failed to send message downstream");
                                 // Update global proxy downstream state
-                                ProxyState::update_downstream_state(DownstreamState::Down(
+                                ProxyState::update_downstream_state(
                                     DownstreamType::JdClientMiningDownstream,
-                                ));
+                                );
                                 break;
                             };
                         }
@@ -267,9 +265,7 @@ impl Upstream {
                         Ok(_) => unreachable!(),
                         Err(e) => {
                             error!("{e:?}");
-                            ProxyState::update_upstream_state(UpstreamState::Down(
-                                UpstreamType::JDCMiningUpstream,
-                            ));
+                            ProxyState::update_upstream_state(UpstreamType::JDCMiningUpstream);
                             break;
                         }
                     }

@@ -1,5 +1,5 @@
 use crate::{
-    proxy_state::{DownstreamState, DownstreamType, ProxyState},
+    proxy_state::{DownstreamType, ProxyState},
     shared::utils::AbortOnDrop,
     translator::error::Error,
 };
@@ -125,9 +125,7 @@ impl Downstream {
         .await
         {
             error!("Failed to start receive downstream task: {e}");
-            ProxyState::update_downstream_state(DownstreamState::Down(
-                DownstreamType::TranslatorDownstream,
-            ));
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         };
 
         if let Err(e) = start_send_to_downstream(
@@ -140,9 +138,7 @@ impl Downstream {
         .await
         {
             error!("Failed to start send_to_downstream task {e}");
-            ProxyState::update_downstream_state(DownstreamState::Down(
-                DownstreamType::TranslatorDownstream,
-            ));
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         };
 
         if let Err(e) = start_notify(
@@ -156,9 +152,7 @@ impl Downstream {
         .await
         {
             error!("Failed to start notify task: {e}");
-            ProxyState::update_downstream_state(DownstreamState::Down(
-                DownstreamType::TranslatorDownstream,
-            ));
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         };
     }
 
@@ -187,9 +181,7 @@ impl Downstream {
         .await
         {
             error!("Translator downstream failed to accept: {e}");
-            ProxyState::update_downstream_state(DownstreamState::Down(
-                DownstreamType::TranslatorDownstream,
-            ));
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
             return Err(e);
         };
         Ok(abortable)
@@ -240,9 +232,7 @@ impl Downstream {
             Err(e) => {
                 // Poisoned mutex
                 error!("{e}");
-                ProxyState::update_downstream_state(DownstreamState::Down(
-                    DownstreamType::TranslatorDownstream,
-                ));
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 return;
             }
         };
@@ -257,17 +247,13 @@ impl Downstream {
             Err(e) => {
                 error!("{e}");
                 // Poisoned mutex
-                ProxyState::update_downstream_state(DownstreamState::Down(
-                    DownstreamType::TranslatorDownstream,
-                ));
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 return;
             }
         };
         if sender.send(msg).await.is_err() {
             error!("Translator downstream failed to send message");
-            ProxyState::update_downstream_state(DownstreamState::Down(
-                DownstreamType::TranslatorDownstream,
-            ));
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         }
     }
     #[cfg(test)]

@@ -1,6 +1,6 @@
 use super::{downstream::Downstream, task_manager::TaskManager};
 use crate::{
-    proxy_state::{DownstreamState, DownstreamType, ProxyState},
+    proxy_state::{DownstreamType, ProxyState},
     translator::error::Error,
 };
 use roles_logic_sv2::utils::Mutex;
@@ -34,9 +34,7 @@ pub async fn start_receive_downstream(
                     Downstream::handle_incoming_sv1(downstream.clone(), incoming).await
                 {
                     error!("Failed to handle incoming sv1 msg: {:?}", error);
-                    ProxyState::update_downstream_state(DownstreamState::Down(
-                        DownstreamType::TranslatorDownstream,
-                    ));
+                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 };
             } else {
                 // Message received could not be converted to rpc message

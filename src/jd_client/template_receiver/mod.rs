@@ -1,5 +1,5 @@
 mod task_manager;
-use crate::proxy_state::{DownstreamState, DownstreamType, JdState, TpState};
+use crate::proxy_state::{DownstreamType, JdState, TpState};
 use crate::shared::utils::AbortOnDrop;
 use crate::{
     jd_client::mining_downstream::DownstreamMiningNode as Downstream, proxy_state::ProxyState,
@@ -303,7 +303,9 @@ impl TemplateRx {
                                                 {
                                                     error!("{e:?}");
                                                     // Update global downstream state to down
-                                                    ProxyState::update_downstream_state(DownstreamState::Down(DownstreamType::JdClientMiningDownstream));
+                                                    ProxyState::update_downstream_state(
+                                                        DownstreamType::JdClientMiningDownstream,
+                                                    );
                                                 };
                                             }
                                             Some(TemplateDistribution::SetNewPrevHash(m)) => {
@@ -439,7 +441,8 @@ impl TemplateRx {
         while let Some(solution) = rx.recv().await {
             let test_only = match self_.safe_lock(|s| s.test_only_do_not_send_solution_to_tp) {
                 Ok(test_only) => test_only,
-                Err(_) => {
+                Err(e) => {
+                    error!("{e:?}");
                     // TemplateRx mutex poisoned
                     // Update global tp state to down
                     ProxyState::update_tp_state(TpState::Down);

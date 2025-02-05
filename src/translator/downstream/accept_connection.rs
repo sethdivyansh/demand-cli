@@ -1,5 +1,5 @@
 use crate::{
-    proxy_state::{DownstreamState, DownstreamType, ProxyState},
+    proxy_state::{DownstreamType, ProxyState},
     translator::{
         error::Error, proxy::Bridge, upstream::diff_management::UpstreamDifficultyConfig,
     },
@@ -70,9 +70,7 @@ pub async fn start_accept_connection(
                     }
                     Err(e) => {
                         error!("{e:?}");
-                        ProxyState::update_downstream_state(DownstreamState::Down(
-                            DownstreamType::TranslatorDownstream,
-                        ));
+                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                         break;
                     }
                 }

@@ -1,6 +1,5 @@
 // use async_recursion::async_recursion;
 use jemallocator::Jemalloc;
-use roles_logic_sv2::utils::Mutex;
 use router::Router;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[global_allocator]
@@ -10,7 +9,7 @@ use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
+use std::{net::ToSocketAddrs, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info};
 
@@ -27,15 +26,15 @@ const TRANSLATOR_BUFFER_SIZE: usize = 32;
 const MIN_EXTRANONCE_SIZE: u16 = 6;
 const MIN_EXTRANONCE2_SIZE: u16 = 5;
 const UPSTREAM_EXTRANONCE1_SIZE: usize = 15;
-const EXPECTED_SV1_HASHPOWER: f32 = 100_000_000_000.0;
+const EXPECTED_SV1_HASHPOWER: f32 = 100_000_000_000_000.0;
 //const EXPECTED_SV1_HASHPOWER: f32 = 1_000_0.0;
 const SHARE_PER_MIN: f32 = 10.0;
 const CHANNEL_DIFF_UPDTATE_INTERVAL: u32 = 10;
-const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 1_000_000_000_000.0;
+const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 10_000_000_000_000.0;
 //const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 1_000_0.0;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
 const POOL_ADDRESS: &str = "mining.dmnd.work:2000";
-//const POOL_ADDRESS: &str = "0.0.0.0:20000";
+//const POOL_ADDRESS: &str = "127.0.0.1:20000";
 //const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
 const AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 //const TP_ADDRESS: &str = "127.0.0.1:8442";
@@ -46,11 +45,9 @@ lazy_static! {
         std::env::var("SV1_DOWN_LISTEN_ADDR").unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
 }
 lazy_static! {
-    static ref TP_ADDRESS: Mutex<Option<String>> = Mutex::new(std::env::var("TP_ADDRESS").ok());
+    static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
+        roles_logic_sv2::utils::Mutex::new(std::env::var("TP_ADDRESS").ok());
 }
-lazy_static! {
-    static ref PROXY_STATE: Arc<Mutex<ProxyState>> = Arc::new(Mutex::new(ProxyState::new()));
-} // Added mutex so we can modify the value to None if tp is down
 
 #[tokio::main]
 async fn main() {
@@ -82,7 +79,6 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 }
 
-// #[async_recursion]
 async fn initialize_proxy(
     router: &mut Router,
     mut pool_addr: Option<std::net::SocketAddr>,
@@ -101,7 +97,8 @@ async fn initialize_proxy(
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         secs -= 1;
                     }
-                    continue; // Restart loop, esentially restarting proxy
+                    // Restart loop, esentially restarting proxy
+                    continue;
                 }
             };
 
@@ -112,9 +109,10 @@ async fn initialize_proxy(
         let translator_abortable = match translator::start(downs_sv1_rx, translator_up_tx).await {
             Ok(abortable) => abortable,
             Err(e) => {
-                error!("Impossible to initialize translathor: {e}");
+                error!("Impossible to initialize translator: {e}");
                 // Impossible to start the proxy so we restart proxy
                 ProxyState::update_translator_state(TranslatorState::Down);
+                ProxyState::update_tp_state(TpState::Down);
                 return;
             }
         };
@@ -192,21 +190,15 @@ async fn initialize_proxy(
         }
 
         match monitor(router, abort_handles, epsilon).await {
-            Ok(Reconnect::NewUpstream(new_pool_addr)) => {
-                ProxyState::update_proxy_state_up(); // Update global proxy state to Up before reinitializing
-
-                // Instead of recursive calls here, we can achieve the same outcome by updating `pool_addr` and continue for the next reinitailization. This avoids stack growth, and improves memory efficiency and performance.
+            Reconnect::NewUpstream(new_pool_addr) => {
+                ProxyState::update_proxy_state_up();
                 pool_addr = Some(new_pool_addr);
                 continue;
             }
-            Ok(Reconnect::NoUpstream) => {
-                ProxyState::update_proxy_state_up(); // Update global proxy state to Up before reinitializing
+            Reconnect::NoUpstream => {
+                ProxyState::update_proxy_state_up();
                 pool_addr = None;
                 continue;
-            }
-            Err(_) => {
-                info!("An error occurred. Exiting...");
-                return;
             }
         };
     }
@@ -216,14 +208,19 @@ async fn monitor(
     router: &mut Router,
     abort_handles: Vec<(AbortOnDrop, std::string::String)>,
     epsilon: Duration,
-) -> Result<Reconnect, ()> {
-    //let mut interval = tokio::time::interval(time::Duration::from_secs(10));
+) -> Reconnect {
+    let mut should_check_upstreams_latency = 0;
     loop {
-        if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
-            info!("Faster upstream detected. Reinitializing proxy...");
-            drop(abort_handles);
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await; // Needs a little to time to drop
-            return Ok(Reconnect::NewUpstream(new_upstream));
+        // Check if a better upstream exist every 100 seconds
+        if should_check_upstreams_latency == 10 * 100 {
+            should_check_upstreams_latency = 0;
+            if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
+                info!("Faster upstream detected. Reinitializing proxy...");
+                drop(abort_handles);
+                // Needs a little to time to drop
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                return Reconnect::NewUpstream(new_upstream);
+            }
         }
 
         // Monitor finished tasks
@@ -237,49 +234,32 @@ async fn monitor(
             }
 
             // Check if the proxy state is down, and if so, reinitialize the proxy.
-            let is_proxy_down_result = PROXY_STATE.safe_lock(|proxy| proxy.is_proxy_down());
-
-            match is_proxy_down_result {
-                Ok(is_proxy_down) => {
-                    if is_proxy_down.0 {
-                        error!(
-                            "{:?} is DOWN. Reinitializing proxy...",
-                            is_proxy_down.1.unwrap_or("Proxy".to_string())
-                        );
-                        return Ok(Reconnect::NoUpstream);
-                    } else {
-                        return Err(()); // Proxy is up
-                    }
-                }
-                Err(e) => {
-                    error!("Global Proxy Mutex Corrupted: {e}");
-                    return Err(());
-                }
+            let is_proxy_down = ProxyState::is_proxy_down();
+            if is_proxy_down.0 {
+                error!(
+                    "Status: {:?}. Reinitializing proxy...",
+                    is_proxy_down.1.unwrap_or("Proxy".to_string())
+                );
+                return Reconnect::NoUpstream;
+            } else {
+                return Reconnect::NoUpstream;
             }
         }
 
         // Check if the proxy state is down, and if so, reinitialize the proxy.
-        let is_proxy_down_result = PROXY_STATE.safe_lock(|proxy| proxy.is_proxy_down());
-
-        match is_proxy_down_result {
-            Ok(is_proxy_down) => {
-                if is_proxy_down.0 {
-                    error!(
-                        "Status: {:?}. Reinitializing proxy...",
-                        is_proxy_down.1.unwrap_or_else(|| "Proxy".to_string())
-                    );
-                    drop(abort_handles); // Drop all abort handles
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await; // Needs a little time to drop
-                    return Ok(Reconnect::NoUpstream);
-                }
-            }
-            Err(e) => {
-                error!("Global Proxy Mutex Corrupted: {e}");
-                return Err(());
-            }
+        let is_proxy_down = ProxyState::is_proxy_down();
+        if is_proxy_down.0 {
+            error!(
+                "{:?} is DOWN. Reinitializing proxy...",
+                is_proxy_down.1.unwrap_or("Proxy".to_string())
+            );
+            drop(abort_handles); // Drop all abort handles
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await; // Needs a little to time to drop
+            return Reconnect::NoUpstream;
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        should_check_upstreams_latency += 1;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 }
 

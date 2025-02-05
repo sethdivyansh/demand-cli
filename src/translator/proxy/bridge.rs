@@ -20,7 +20,7 @@ use super::{
     task_manager::TaskManager,
 };
 use crate::{
-    proxy_state::{ProxyState, TranslatorState, UpstreamState, UpstreamType},
+    proxy_state::{ProxyState, TranslatorState, UpstreamType},
     shared::utils::AbortOnDrop,
 };
 use roles_logic_sv2::{channel_logic::channel_factory::OnNewShare, Error as RolesLogicError};
@@ -448,9 +448,7 @@ impl Bridge {
                 .await
                 {
                     error!("Failed to handle SetNewPrevHash: {e}");
-                    ProxyState::update_upstream_state(UpstreamState::Down(
-                        UpstreamType::TranslatorUpstream,
-                    ));
+                    ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
                     return;
                 }
             }

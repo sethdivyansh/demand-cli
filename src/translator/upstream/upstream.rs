@@ -33,7 +33,7 @@ use tracing::{error, info, warn};
 
 use super::task_manager::TaskManager;
 use crate::{
-    proxy_state::{ProxyState, UpstreamState, UpstreamType},
+    proxy_state::{ProxyState, UpstreamType},
     shared::utils::AbortOnDrop,
 };
 use bitcoin::BlockHash;
@@ -294,7 +294,7 @@ impl Upstream {
                                                 error!(
                                                     "Failed to create a valid extended extranonce from {:?} {:?} {:?} {:?}: {:?}",
                                                     extranonce_prefix, range_0, range_1, range_2, e
-                                                ); ProxyState::update_upstream_state(UpstreamState::Down(UpstreamType::TranslatorUpstream));
+                                                ); ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
                                                 break;
                                             }
                                         };
