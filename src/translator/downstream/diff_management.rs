@@ -11,7 +11,7 @@ use roles_logic_sv2::utils::Mutex;
 use std::{ops::Div, sync::Arc};
 use sv1_api::json_rpc;
 
-use bitcoin::util::uint::Uint256;
+use bitcoin::util::{uint::Uint256, BitArray};
 use tracing::{error, info, warn};
 
 // TODO redesign it to not use all this mutexes
@@ -238,7 +238,8 @@ impl Downstream {
             error!("realized_share_per_min should not be negative");
             return Err(Error::Unrecoverable);
         } else {
-            let new_estimation = hash_rate_from_target(miner_target, realized_share_per_min)?;
+            let target = Self::safe_target(miner_target);
+            let new_estimation = hash_rate_from_target(target, realized_share_per_min)?;
 
             if let Some(new_estimation) = Self::refine_new_estimation(
                 time_delta_millis,
@@ -255,6 +256,30 @@ impl Downstream {
                 Ok(None)
             }
         }
+    }
+
+    // Check if target is 2^256 - 1
+    fn safe_target(target: U256<'static>) -> U256<'static> {
+        let mut target_arr: [u8; 32] = [0; 32];
+        target_arr.as_mut().copy_from_slice(target.inner_as_ref());
+        target_arr.reverse();
+
+        // Convert target to Uint256
+        let target_uint256 = Uint256::from_be_bytes(target_arr);
+
+        // Create the maximum possible value for Uint256 (2^256 - 1)
+        let max_target = Uint256::from_be_bytes([255_u8; 32]);
+
+        // Check if target is equal to 2^256 - 1
+        if target_uint256 == max_target {
+            // Subtract 1
+            let adjusted_target = target_uint256 - Uint256::one();
+
+            let mut adjusted_target_bytes = adjusted_target.to_be_bytes();
+            adjusted_target_bytes.reverse(); // Convert back to little-endian
+            return U256::from(adjusted_target_bytes);
+        }
+        target // Otherwise, return the original target
     }
 
     fn refine_new_estimation(
