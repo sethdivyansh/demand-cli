@@ -8,10 +8,13 @@ use sv1_api::{self, methods::server_to_client::SetDifficulty, server_to_client::
 
 use super::super::error::{Error, ProxyResult};
 use roles_logic_sv2::utils::Mutex;
-use std::{ops::Div, sync::Arc};
+use std::{
+    ops::{Div, Sub},
+    sync::Arc,
+};
 use sv1_api::json_rpc;
 
-use bitcoin::util::uint::Uint256;
+use bitcoin::util::{uint::Uint256, BitArray};
 use tracing::{error, info, warn};
 
 // TODO redesign it to not use all this mutexes
@@ -238,7 +241,9 @@ impl Downstream {
             error!("realized_share_per_min should not be negative");
             return Err(Error::Unrecoverable);
         } else {
-            let new_estimation = hash_rate_from_target(miner_target, realized_share_per_min)?;
+            let (target, share_per_minute) =
+                sanitize_share_per_min(miner_target, realized_share_per_min);
+            let new_estimation = hash_rate_from_target(target, share_per_minute)?;
 
             if let Some(new_estimation) = Self::refine_new_estimation(
                 time_delta_millis,
@@ -312,6 +317,47 @@ impl Downstream {
     }
 }
 
+// `sanitize_share_per_min` function does 2 things:
+// 1. Makes sure that `share_per_min` is at least 1.
+// 2. Prevents overflow if `target` is at maximum (U256)
+//
+// Advantages
+// - Simple and stable
+// - Keeps difficulty within reasonable range
+//
+// Impact on Difficulty
+// - It may slightly increase difficulty, making it less flexibile for miners with low hashpower.
+// For example, a miner submitting 1 share every 2 minutes has `share_per_min` as  0.5
+// Enforcing a minimum of 1 for `share_per_min` will raise the difficulty
+//
+// Trade-off: Stability vs. precision in difficulty adjustments.
+pub fn sanitize_share_per_min(
+    miner_target: U256<'static>,
+    mut share_per_min: f64,
+) -> (U256<'static>, f64) {
+    // share_per_min should be at least 1
+    share_per_min = share_per_min.max(1.0);
+
+    let mut target_arr: [u8; 32] = [0; 32];
+    target_arr
+        .as_mut()
+        .copy_from_slice(miner_target.inner_as_ref());
+    target_arr.reverse();
+
+    let mut target = Uint256::from_be_bytes(target_arr);
+
+    let max_target = Uint256::from_be_bytes([255_u8; 32]);
+
+    if target == max_target {
+        // Subtract 1, so that `target_plus_one` in `hash_rate_from_target` will not overflow
+        target = target.sub(Uint256::one());
+    }
+    let mut target = target.to_be_bytes();
+    target.reverse();
+
+    (target.into(), share_per_min)
+}
+
 fn target_to_sv1_message(
     hash_power: f64,
     share_per_min: f64,
@@ -330,7 +376,9 @@ fn target_to_sv1_message(
 #[cfg(test)]
 mod test {
     use super::super::super::upstream::diff_management::UpstreamDifficultyConfig;
-    use crate::translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream};
+    use crate::translator::downstream::{
+        diff_management::sanitize_share_per_min, downstream::DownstreamDifficultyConfig, Downstream,
+    };
     use binary_sv2::U256;
     use rand::{thread_rng, Rng};
     use roles_logic_sv2::{mining_sv2::Target, utils::Mutex};
@@ -380,6 +428,40 @@ mod test {
     fn get_error(lambda: f64) -> f64 {
         let z_score_99 = 2.576;
         z_score_99 * lambda.sqrt()
+    }
+
+    #[test]
+    fn test_safe_share_per_min_with_low_val() {
+        // share_per_min < 1.0 should be adjusted to 1.0
+
+        let target = U256::from([100_u8; 32]);
+        let share_per_min = 0.005;
+
+        // Call safe_target
+        let (_, new_share_per_min) = sanitize_share_per_min(target, share_per_min);
+
+        // Validate that share_per_min was correctly adjusted
+        assert_eq!(
+            new_share_per_min, 1.0,
+            "share_per_min should be adjusted to 1.0 to prevent division issues."
+        );
+    }
+
+    #[test]
+    fn test_safe_share_per_min_with_big_val() {
+        // share_per_min < 1.0 should be adjusted to 1.0
+
+        let target = U256::from([100_u8; 32]);
+        let share_per_min = 50.0;
+
+        // Call safe_target
+        let (_, new_share_per_min) = sanitize_share_per_min(target, share_per_min);
+
+        // Validate that share_per_min was correctly adjusted
+        assert_eq!(
+            new_share_per_min, 50.0,
+            "share_per_min should not be adjusted if it's already valid."
+        );
     }
 
     fn mock_mine(target: Target, share: &mut [u8; 80]) {
