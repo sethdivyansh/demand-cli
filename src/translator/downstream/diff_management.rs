@@ -241,9 +241,9 @@ impl Downstream {
             error!("realized_share_per_min should not be negative");
             return Err(Error::Unrecoverable);
         } else {
-            let share_per_minute =
-                sanitize_share_per_min(miner_target.clone(), realized_share_per_min);
-            let new_estimation = hash_rate_from_target(miner_target, share_per_minute)?;
+            let (target, share_per_minute) =
+                sanitize_share_per_min(miner_target, realized_share_per_min);
+            let new_estimation = hash_rate_from_target(target, share_per_minute)?;
 
             if let Some(new_estimation) = Self::refine_new_estimation(
                 time_delta_millis,
@@ -317,21 +317,24 @@ impl Downstream {
     }
 }
 
-// `sanitize_share_per_min` function does 3 things:
+// `sanitize_share_per_min` function does 2 things:
 // 1. Makes sure that `share_per_min` is at least 1.
 // 2. Prevents overflow if `target` is at maximum (U256)
-// 3. Adjusts `share_per_min` if `share_per_min * target` is too small
 //
 // Advantages
 // - Simple and stable
 // - Keeps difficulty within reasonable range
-// - Prevents division by zero errors  if `share_per_min * target` is too small
 //
 // Impact on Difficulty
 // - It may slightly increase difficulty, making it less flexibile for miners with low hashpower.
+// For example, a miner submitting 1 share every 2 minutes has `share_per_min` as  0.5
+// Enforcing a minimum of 1 for `share_per_min` will raise the difficulty
 //
 // Trade-off: Stability vs. precision in difficulty adjustments.
-pub fn sanitize_share_per_min(miner_target: U256<'static>, mut share_per_min: f64) -> f64 {
+pub fn sanitize_share_per_min(
+    miner_target: U256<'static>,
+    mut share_per_min: f64,
+) -> (U256<'static>, f64) {
     // share_per_min should be at least 1
     share_per_min = share_per_min.max(1.0);
 
@@ -341,30 +344,18 @@ pub fn sanitize_share_per_min(miner_target: U256<'static>, mut share_per_min: f6
         .copy_from_slice(miner_target.inner_as_ref());
     target_arr.reverse();
 
-    let mut target_uint256 = Uint256::from_be_bytes(target_arr);
+    let mut target = Uint256::from_be_bytes(target_arr);
 
     let max_target = Uint256::from_be_bytes([255_u8; 32]);
 
-    if target_uint256 == max_target {
+    if target == max_target {
         // Subtract 1, so that `target_plus_one` in `hash_rate_from_target` will not overflow
-        target_uint256 = target_uint256.sub(Uint256::one());
+        target = target.sub(Uint256::one());
     }
+    let mut target = target.to_be_bytes();
+    target.reverse();
 
-    let mut target_plus_one = target_uint256;
-    target_plus_one.increment();
-
-    // Convert target_plus_one to an approximate f64
-    //May lose precision for large values
-    let target = target_plus_one.low_u64() as f64;
-
-    if share_per_min * target < 1.0 {
-        error!(
-            "Hashrate from target Error: share_per_min * target_f64 < 1.0 less than 1: target+1_f4: {}, share per min: {}",
-            target, share_per_min
-        );
-        share_per_min = (1.0 / target).max(1.0);
-    }
-    share_per_min
+    (target.into(), share_per_min)
 }
 
 fn target_to_sv1_message(
@@ -447,7 +438,7 @@ mod test {
         let share_per_min = 0.005;
 
         // Call safe_target
-        let new_share_per_min = sanitize_share_per_min(target, share_per_min);
+        let (_, new_share_per_min) = sanitize_share_per_min(target, share_per_min);
 
         // Validate that share_per_min was correctly adjusted
         assert_eq!(
@@ -464,7 +455,7 @@ mod test {
         let share_per_min = 50.0;
 
         // Call safe_target
-        let new_share_per_min = sanitize_share_per_min(target, share_per_min);
+        let (_, new_share_per_min) = sanitize_share_per_min(target, share_per_min);
 
         // Validate that share_per_min was correctly adjusted
         assert_eq!(
