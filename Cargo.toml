@@ -18,6 +18,7 @@ tracing = { version = "0.1" }
 tracing-subscriber = { version = "*", features = ["env-filter"]}
 tokio = {version="^1.36.0",features = ["full","tracing"]}
 key-utils = "1.0.0"
+pid ={ version = "4.0.0"}
 #roles_logic_sv2 = "1.2.1"
 #sv1_api = "1.0.1"
 #demand-sv2-connection = "0.0.3"

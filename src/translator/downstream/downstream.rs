@@ -7,6 +7,7 @@ use crate::{
 use super::{
     super::upstream::diff_management::UpstreamDifficultyConfig, task_manager::TaskManager,
 };
+use pid::Pid;
 use tokio::sync::{
     broadcast,
     mpsc::{channel, Receiver, Sender},
@@ -34,9 +35,10 @@ use tracing::{error, info, warn};
 #[derive(Debug, Clone)]
 pub struct DownstreamDifficultyConfig {
     pub estimated_downstream_hash_rate: f32,
-    pub shares_per_minute: f32,
     pub submits_since_last_update: u32,
     pub timestamp_of_last_update: u128,
+    pub pid_controller: Pid<f32>,
+    pub current_difficulty: f32,
 }
 
 impl PartialEq for DownstreamDifficultyConfig {
@@ -93,11 +95,46 @@ impl Downstream {
         assert!(last_notify.is_some());
 
         let (tx_outgoing, receiver_outgoing) = channel(crate::TRANSLATOR_BUFFER_SIZE);
+
+        // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32),
+        let initial_hash_rate = crate::EXPECTED_SV1_HASHPOWER;
+        let share_per_second = crate::SHARE_PER_MIN / 60.0;
+        let initial_difficulty = initial_hash_rate / (share_per_second * 2f32.powf(32.0));
+
+        // The PID controller uses negative proportional (P) and integral (I) gains to reduce difficulty
+        // when the actual share rate falls below the target rate (SHARE_PER_MIN). Negative gains are chosen
+        // because a lower share rate indicates the difficulty is too high for the miner, requiring a downward
+        // adjustment to make mining easier.
+        //
+        // // Example:
+        // - Target share rate (SHARE_PER_MIN) = 10 shares/min.
+        // - Case 1: Actual share rate = 5 shares/min (less than target):
+        //   - Error = 10 - 5 = 5 (positive).
+        //   - P output = -3.0 * 5 = -15 (reduces difficulty by 15).
+        //   - I output (assuming error persists 5 intervals) = -0.5 * (-15 * 5) = -37.5 (further reduction).
+        //   - Difficulty decreases, making mining easier to increase share rate.
+        //
+        // - Case 2: Actual share rate = 12 shares/min (greater than target):
+        //   - Error = 10 - 12 = -2 (negative).
+        //   - P output = -3.0 * -2 = 6 (increases difficulty by 6).
+        //   - I output (5 intervals) = -0.5 * (-2 * 5) = 5 (further increase).
+        //   - Difficulty increases, slows share rate.
+        //
+        // The positive D gain (0.05) dampens rapid changes, e.g., if share rate jumps from 8 to 12, D might
+        // add a small positive adjustment to prevent overshooting.
+
+        let output_limit = initial_hash_rate * 0.7;
+        let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, output_limit);
+        pid.p(-3.0, output_limit)
+            .i(-0.5, output_limit)
+            .d(0.05, output_limit);
+
         let difficulty_mgmt = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate: crate::EXPECTED_SV1_HASHPOWER,
-            shares_per_minute: crate::SHARE_PER_MIN,
             submits_since_last_update: 0,
             timestamp_of_last_update: 0,
+            pid_controller: pid,
+            current_difficulty: initial_difficulty,
         };
 
         let downstream = Arc::new(Mutex::new(Downstream {
