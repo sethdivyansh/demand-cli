@@ -17,14 +17,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Update POOL_ADDRESS in src/main.rs
-        run: |
-          sed -i 's/mining\.dmnd\.work:2000/k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000/g' src/main.rs
-
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          rust-version: stable
 
       - name: Build Linux Binary
         run: cargo build --release
@@ -45,14 +39,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # BSD sed requires an empty string after -i.
-      - name: Update POOL_ADDRESS in src/main.rs
-        run: sed -i '' 's/mining\.dmnd\.work:2000/k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000/g' src/main.rs
-
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          rust-version: stable
 
       - name: Build macOS Binary
         run: cargo build --release
@@ -76,8 +64,6 @@ jobs:
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          rust-version: stable
 
       - name: Install cargo-release
         run: cargo install cargo-release
