@@ -1,3 +1,4 @@
+use clap::Parser;
 // use async_recursion::async_recursion;
 use jemallocator::Jemalloc;
 use router::Router;
@@ -34,9 +35,10 @@ const CHANNEL_DIFF_UPDTATE_INTERVAL: u32 = 10;
 //const MIN_SV1_DOWSNTREAM_HASHRATE: f32 = 1_000_0.0;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
 const POOL_ADDRESS: &str = "mining.dmnd.work:2000";
-//const POOL_ADDRESS: &str = "127.0.0.1:20000";
-//const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
-const AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
+const TEST_POOL_ADDRESS: &str =
+    "k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000";
+const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
+const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 //const TP_ADDRESS: &str = "127.0.0.1:8442";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
@@ -47,6 +49,12 @@ lazy_static! {
 lazy_static! {
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(std::env::var("TP_ADDRESS").ok());
+}
+#[derive(Parser)]
+struct Args {
+    // Use test enpoint if test flag is provided
+    #[clap(long)]
+    test: bool,
 }
 
 #[tokio::main]
@@ -61,8 +69,25 @@ async fn main() {
         ))
         .init();
     std::env::var("TOKEN").expect("Missing TOKEN environment variable");
-    let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let address = POOL_ADDRESS
+    let args = Args::parse();
+
+    // Select the endpoint based on the --test flag
+    let pool_address = if args.test {
+        info!("Connected to test endpoint: {}", TEST_POOL_ADDRESS);
+        TEST_POOL_ADDRESS
+    } else {
+        POOL_ADDRESS
+    };
+
+    // Select the pubkey based on the --test flag
+    let auth_pub_key = if args.test {
+        TEST_AUTH_PUB_KEY
+    } else {
+        AUTH_PUB_KEY
+    };
+
+    let auth_pub_k: Secp256k1PublicKey = auth_pub_key.parse().expect("Invalid public key");
+    let address = pool_address
         .to_socket_addrs()
         .expect("Invalid pool address")
         .next()
