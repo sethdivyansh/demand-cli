@@ -1,5 +1,5 @@
 use super::{Downstream, DownstreamMessages, SetDownstreamTarget};
-use roles_logic_sv2::{self};
+use roles_logic_sv2::{self, utils::from_u128_to_uint256};
 use sv1_api::{self, methods::server_to_client::SetDifficulty, server_to_client::Notify};
 
 use super::super::error::{Error, ProxyResult};
@@ -115,19 +115,31 @@ impl Downstream {
     /// Converts difficulty to a 256-bit target.
     /// The target T is calculated as T = pdiff / D, where pdiff is the maximum target
     fn difficulty_to_target(difficulty: f32) -> [u8; 32] {
+        if difficulty <= 0.0 {
+            panic!("Difficulty must be positive"); // should never happen because diff is clmaped to be at least 0.001
+        }
+
         let pdiff: [u8; 32] = [
             0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
         ];
         let pdiff = Uint256::from_be_bytes(pdiff);
+        let scale: u128 = 1_000_000; // 10^6, is enough for min difficulty of 0.001
 
-        let mut diff = difficulty.round() as u64;
-        if diff < 1 {
-            diff = 1
+        // To handle the floating-point diff and `pdiff`, we scale it by 10^6 (1_000_000) to convert it to an integer
+        // For example, if difficulty is 0.001:
+        //   diff_int = 0.001 * 1e6 = 1_000
+        let scaled_difficulty = difficulty * (scale as f32);
+
+        if scaled_difficulty > (u128::MAX as f32) {
+            panic!("Difficulty too large: scaled value exceeds u128 maximum");
         }
-        let d_uint256 = Uint256::from_u64(diff).expect("Failed to convert diff to Uint256");
+        let diff: u128 = scaled_difficulty as u128;
 
-        let target = pdiff / d_uint256;
+        let diff = from_u128_to_uint256(diff);
+        let scale = from_u128_to_uint256(scale);
+
+        let target = pdiff * scale / diff;
         let mut target = target.to_be_bytes();
 
         target.reverse(); // Convert to little-endian for SV1
@@ -188,12 +200,17 @@ impl Downstream {
             // it means that the diff is eithr too small or too big.
             // So the current diff is far off from ideal diff for the miner
             // To correct this, increase p and i so that it adjusts diff more aggressively
-            pid.i(-5.0 * 10.0, pid.output_limit);
-            pid.p(-1000.0, pid.output_limit);
-        }
 
+            // Adjust difficulty by approx 50%
+            let change = -0.50 * current_difficulty;
+            // Set p_gain to be ratio of the change to the current error
+            let p_gain = change / (pid.setpoint - realized_share_per_min);
+            pid.p(p_gain, pid.output_limit);
+            pid.i(p_gain / 10.0, pid.output_limit);
+            pid.d(0.1, pid.output_limit);
+        }
         let pid_output = pid.next_control_output(realized_share_per_min).output;
-        let new_difficulty = (current_difficulty + pid_output).max(1.0);
+        let new_difficulty = (current_difficulty + pid_output).max(0.001);
 
         // Check that differnce in difficulty is significant or enough time has passed to update
         let threshold = 0.05;

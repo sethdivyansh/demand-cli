@@ -125,9 +125,9 @@ impl Downstream {
 
         let output_limit = initial_hash_rate * 0.7;
         let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, output_limit);
-        pid.p(-3.0, output_limit)
-            .i(-0.5, output_limit)
-            .d(0.05, output_limit);
+        pid.p(-1.0, output_limit)
+            .i(-0.01, output_limit)
+            .d(0.001, output_limit);
 
         let difficulty_mgmt = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate: crate::EXPECTED_SV1_HASHPOWER,
