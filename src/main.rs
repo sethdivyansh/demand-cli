@@ -1,5 +1,4 @@
 use clap::Parser;
-// use async_recursion::async_recursion;
 use jemallocator::Jemalloc;
 use router::Router;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -73,7 +72,7 @@ async fn main() {
 
     // Select the endpoint based on the --test flag
     let pool_address = if args.test {
-        info!("Connected to test endpoint: {}", TEST_POOL_ADDRESS);
+        info!("Connecting to test endpoint...");
         TEST_POOL_ADDRESS
     } else {
         POOL_ADDRESS

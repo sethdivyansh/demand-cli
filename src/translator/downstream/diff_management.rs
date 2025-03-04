@@ -30,6 +30,8 @@ impl Downstream {
         let (message, _) = diff_to_sv1_message(diff as f64)?;
         Downstream::send_message_downstream(self_.clone(), message).await;
 
+        tokio::spawn(crate::translator::utils::check_share_rate_limit());
+
         Ok(())
     }
 
@@ -115,9 +117,7 @@ impl Downstream {
     /// Converts difficulty to a 256-bit target.
     /// The target T is calculated as T = pdiff / D, where pdiff is the maximum target
     fn difficulty_to_target(difficulty: f32) -> [u8; 32] {
-        if difficulty <= 0.0 {
-            panic!("Difficulty must be positive"); // should never happen because diff is clmaped to be at least 0.001
-        }
+        let difficulty = f32::max(difficulty, 0.001);
 
         let pdiff: [u8; 32] = [
             0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
