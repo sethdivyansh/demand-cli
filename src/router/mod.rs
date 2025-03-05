@@ -176,7 +176,6 @@ impl Router {
                 "Failed to get mining setup latencies for {:?}: Timeout",
                 pool_address
             );
-            ()
         })??;
 
         if (PoolLatency::get_mining_setup_latencies(

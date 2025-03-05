@@ -382,35 +382,37 @@ impl IsServer<'static> for Downstream {
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
         info!("Down: Handling mining.submit: {:?}", &request);
 
-        // TODO: Check if receiving valid shares by adding diff field to Downstream
+        if !self.first_job_received {
+            return false;
+        }
 
+        // TODO: Check if receiving valid shares by adding diff field to Downstream
         match allow_submit_share() {
             Ok(true) => {
-                if self.first_job_received {
-                    let to_send = SubmitShareWithChannelId {
-                        channel_id: self.connection_id,
-                        share: request.clone(),
-                        extranonce: self.extranonce1.clone(),
-                        extranonce2_len: self.extranonce2_len,
-                        version_rolling_mask: self.version_rolling_mask.clone(),
-                    };
-                    if let Err(e) = self
-                        .tx_sv1_bridge
-                        .try_send(DownstreamMessages::SubmitShares(to_send))
-                    {
-                        error!("Failed to start receive downstream task: {e:?}");
-                        // Return false because submit was not properly handled
-                        return false;
-                    };
-                }
+                let to_send = SubmitShareWithChannelId {
+                    channel_id: self.connection_id,
+                    share: request.clone(),
+                    extranonce: self.extranonce1.clone(),
+                    extranonce2_len: self.extranonce2_len,
+                    version_rolling_mask: self.version_rolling_mask.clone(),
+                };
+                if let Err(e) = self
+                    .tx_sv1_bridge
+                    .try_send(DownstreamMessages::SubmitShares(to_send))
+                {
+                    error!("Failed to start receive downstream task: {e:?}");
+                    // Return false because submit was not properly handled
+                    return false;
+                };
                 true
             }
             Ok(false) => {
                 warn!("Share rejected: Exceeded 70 shares/min limit");
                 false
             }
-            Err(e) => {
-                error!("Failed to record share: {e:?}");
+            Err(_) => {
+                // Poisoned mutex, restart proxy
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 false
             }
         }

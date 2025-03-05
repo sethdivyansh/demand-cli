@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use crate::{proxy_state::ProxyState, translator::error::Error};
+use crate::translator::error::Error;
 use lazy_static::lazy_static;
 use roles_logic_sv2::utils::Mutex;
 use tracing::error;
@@ -30,7 +30,6 @@ pub async fn check_share_rate_limit() {
             })
             .unwrap_or_else(|e| {
                 error!("Failed to lock SHARE_TIMESTAMPS: {:?}", e);
-                ProxyState::update_inconsistency(Some(1)); // restart proxy
                 0
             });
 
@@ -40,12 +39,11 @@ pub async fn check_share_rate_limit() {
             })
             .unwrap_or_else(|e| {
                 error!("Failed to lock IS_RATE_LIMITED: {:?}", e);
-                ProxyState::update_inconsistency(Some(1)); // restart proxy
             });
     }
 }
 
-/// Checks if a share can be sent by checking if rate is limited
+/// Checks if rate is limited
 pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bool> {
     // Check if rate-limited
     let is_rate_limited = IS_RATE_LIMITED.safe_lock(|t| *t).map_err(|e| {
