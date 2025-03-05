@@ -4,6 +4,7 @@ use sv1_api::{self, methods::server_to_client::SetDifficulty, server_to_client::
 
 use super::super::error::{Error, ProxyResult};
 use roles_logic_sv2::utils::Mutex;
+use std::ops::{Div, Mul};
 use std::sync::Arc;
 use sv1_api::json_rpc;
 
@@ -116,7 +117,8 @@ impl Downstream {
 
     /// Converts difficulty to a 256-bit target.
     /// The target T is calculated as T = pdiff / D, where pdiff is the maximum target
-    fn difficulty_to_target(difficulty: f32) -> [u8; 32] {
+    pub fn difficulty_to_target(difficulty: f32) -> [u8; 32] {
+        // Clamp difficulty to avoid division by zero or overflow
         let difficulty = f32::max(difficulty, 0.001);
 
         let pdiff: [u8; 32] = [
@@ -124,7 +126,7 @@ impl Downstream {
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
         ];
         let pdiff = Uint256::from_be_bytes(pdiff);
-        let scale: u128 = 1_000_000; // 10^6, is enough for min difficulty of 0.001
+        let scale: u128 = 1_000_000;
 
         // To handle the floating-point diff and `pdiff`, we scale it by 10^6 (1_000_000) to convert it to an integer
         // For example, if difficulty is 0.001:
@@ -139,7 +141,7 @@ impl Downstream {
         let diff = from_u128_to_uint256(diff);
         let scale = from_u128_to_uint256(scale);
 
-        let target = pdiff * scale / diff;
+        let target = pdiff.mul(scale).div(diff);
         let mut target = target.to_be_bytes();
 
         target.reverse(); // Convert to little-endian for SV1
