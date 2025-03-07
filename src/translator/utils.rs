@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use crate::translator::error::Error;
 use lazy_static::lazy_static;
@@ -7,7 +10,7 @@ use tracing::error;
 lazy_static! {
     pub static ref SHARE_TIMESTAMPS: Arc<Mutex<VecDeque<tokio::time::Instant>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(70)));
-    pub static ref IS_RATE_LIMITED: Mutex<bool> = Mutex::new(false);
+    pub static ref IS_RATE_LIMITED: AtomicBool = AtomicBool::new(false);
 }
 
 /// Checks if a share can be sent upstream based on a rate limit of 70 shares per minute.
@@ -33,23 +36,14 @@ pub async fn check_share_rate_limit() {
                 0
             });
 
-        IS_RATE_LIMITED
-            .safe_lock(|adjusting_diff| {
-                *adjusting_diff = count >= 70;
-            })
-            .unwrap_or_else(|e| {
-                error!("Failed to lock IS_RATE_LIMITED: {:?}", e);
-            });
+        IS_RATE_LIMITED.store(count >= 70, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 /// Checks if rate is limited
 pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bool> {
     // Check if rate-limited
-    let is_rate_limited = IS_RATE_LIMITED.safe_lock(|t| *t).map_err(|e| {
-        error!("Failed to lock IS_RATE_LIMITED: {:?}", e);
-        Error::TranslatorDiffConfigMutexPoisoned
-    })?;
+    let is_rate_limited = IS_RATE_LIMITED.load(std::sync::atomic::Ordering::SeqCst);
 
     if is_rate_limited {
         return Ok(false); // Rate limit exceeded, don’t send
