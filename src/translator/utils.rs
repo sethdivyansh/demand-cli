@@ -4,9 +4,13 @@ use std::{
 };
 
 use crate::translator::error::Error;
+use bitcoin::hashes::{sha256d, Hash};
 use lazy_static::lazy_static;
-use roles_logic_sv2::utils::Mutex;
+use roles_logic_sv2::{mining_sv2::Target, utils::Mutex};
+use sv1_api::{client_to_server, server_to_client::Notify};
 use tracing::error;
+
+use super::downstream::Downstream;
 lazy_static! {
     pub static ref SHARE_TIMESTAMPS: Arc<Mutex<VecDeque<tokio::time::Instant>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(70)));
@@ -40,7 +44,7 @@ pub async fn check_share_rate_limit() {
     }
 }
 
-/// Checks if rate is limited
+/// Checks if a share can be sent by checking if rate is limited
 pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bool> {
     // Check if rate-limited
     let is_rate_limited = IS_RATE_LIMITED.load(std::sync::atomic::Ordering::SeqCst);
@@ -49,7 +53,6 @@ pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bo
         return Ok(false); // Rate limit exceeded, don’t send
     }
 
-    // Not rate-limited, record the timestamp
     SHARE_TIMESTAMPS
         .safe_lock(|timestamps| {
             timestamps.push_back(tokio::time::Instant::now());
@@ -60,6 +63,51 @@ pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bo
         })?;
 
     Ok(true) // Share can be sent
+}
+
+pub fn validate_share(
+    request: &client_to_server::Submit<'static>,
+    job: &Notify,
+    difficulty: f32,
+    extranonce1: Vec<u8>,
+) -> bool {
+    // Check job ID match
+    if request.job_id != job.job_id {
+        error!("Share rejected: Job ID mismatch");
+        return false;
+    }
+
+    let prev_hash_vec: Vec<u8> = job.prev_hash.clone().into();
+    let prev_hash: [u8; 32] = prev_hash_vec.try_into().expect("PrevHash must be 32 bytes");
+
+    let mut merkle_branch = Vec::new();
+    for branch in &job.merkle_branch {
+        merkle_branch.push(branch.0.to_vec());
+    }
+
+    let mut extranonce = Vec::new();
+    extranonce.extend_from_slice(extranonce1.as_ref());
+    extranonce.extend_from_slice(request.extra_nonce2.0.as_ref());
+    let extranonce: &[u8] = extranonce.as_ref();
+
+    let mut hash = roles_logic_sv2::utils::get_target(
+        request.nonce.0,
+        job.version.0,
+        request.time.0,
+        extranonce,
+        job.coin_base1.as_ref(),
+        job.coin_base2.as_ref(),
+        bitcoin::BlockHash::from(sha256d::Hash::from_inner(prev_hash)),
+        merkle_branch,
+        job.bits.0,
+    );
+
+    hash.reverse(); //conver to little-endian
+
+    let hash: Target = hash.into();
+    let target = Downstream::difficulty_to_target(difficulty);
+    let target: Target = target.into();
+    hash <= target
 }
 
 // /// currently the pool only supports 16 bytes exactly for its channels

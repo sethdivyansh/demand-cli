@@ -1,7 +1,10 @@
 use crate::{
     proxy_state::{DownstreamType, ProxyState},
     shared::utils::AbortOnDrop,
-    translator::{error::Error, utils::allow_submit_share},
+    translator::{
+        error::Error,
+        utils::{allow_submit_share, validate_share},
+    },
 };
 
 use super::{
@@ -126,8 +129,8 @@ impl Downstream {
         let output_limit = initial_hash_rate * 0.7;
         let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, output_limit);
         pid.p(-1.0, output_limit)
-            .i(-0.01, output_limit)
-            .d(0.001, output_limit);
+            .i(0.01, output_limit)
+            .d(0.01, output_limit);
 
         let difficulty_mgmt = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate: crate::EXPECTED_SV1_HASHPOWER,
@@ -382,37 +385,52 @@ impl IsServer<'static> for Downstream {
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
         info!("Down: Handling mining.submit: {:?}", &request);
 
+        // check first job received
         if !self.first_job_received {
             return false;
         }
-
-        // TODO: Check if receiving valid shares by adding diff field to Downstream
+        //check allowed to send shares
         match allow_submit_share() {
             Ok(true) => {
-                let to_send = SubmitShareWithChannelId {
-                    channel_id: self.connection_id,
-                    share: request.clone(),
-                    extranonce: self.extranonce1.clone(),
-                    extranonce2_len: self.extranonce2_len,
-                    version_rolling_mask: self.version_rolling_mask.clone(),
-                };
-                if let Err(e) = self
-                    .tx_sv1_bridge
-                    .try_send(DownstreamMessages::SubmitShares(to_send))
-                {
-                    error!("Failed to start receive downstream task: {e:?}");
-                    // Return false because submit was not properly handled
+                let Some(job) = &self.last_notify else {
+                    error!("Share rejected: No last job found");
                     return false;
                 };
-                true
+                //check share is valid
+                if validate_share(
+                    request,
+                    job,
+                    self.difficulty_mgmt.current_difficulty,
+                    self.extranonce1.clone(),
+                ) {
+                    let to_send = SubmitShareWithChannelId {
+                        channel_id: self.connection_id,
+                        share: request.clone(),
+                        extranonce: self.extranonce1.clone(),
+                        extranonce2_len: self.extranonce2_len,
+                        version_rolling_mask: self.version_rolling_mask.clone(),
+                    };
+                    if let Err(e) = self
+                        .tx_sv1_bridge
+                        .try_send(DownstreamMessages::SubmitShares(to_send))
+                    {
+                        error!("Failed to start receive downstream task: {e:?}");
+                        // Return false because submit was not properly handled
+                        return false;
+                    };
+                    true
+                } else {
+                    error!("Share rejected: Invalid share");
+                    false
+                }
             }
             Ok(false) => {
                 warn!("Share rejected: Exceeded 70 shares/min limit");
                 false
             }
-            Err(_) => {
-                // Poisoned mutex, restart proxy
-                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            Err(e) => {
+                error!("Failed to record share: {e:?}");
+                ProxyState::update_inconsistency(Some(1)); // restart proxy
                 false
             }
         }
