@@ -1,23 +1,15 @@
 use super::{Downstream, DownstreamMessages, SetDownstreamTarget};
-use binary_sv2::U256;
-use roles_logic_sv2::{
-    self,
-    utils::{hash_rate_from_target, hash_rate_to_target},
-};
+use roles_logic_sv2::{self, utils::from_u128_to_uint256};
 use sv1_api::{self, methods::server_to_client::SetDifficulty, server_to_client::Notify};
 
 use super::super::error::{Error, ProxyResult};
 use roles_logic_sv2::utils::Mutex;
-use std::{
-    ops::{Div, Sub},
-    sync::Arc,
-};
+use std::sync::Arc;
 use sv1_api::json_rpc;
 
-use bitcoin::util::{uint::Uint256, BitArray};
-use tracing::{error, info, warn};
+use bitcoin::util::uint::Uint256;
+use tracing::{error, info};
 
-// TODO redesign it to not use all this mutexes
 impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
@@ -26,6 +18,7 @@ impl Downstream {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time went backwards")
             .as_millis();
+        let diff = self_.safe_lock(|d| d.difficulty_mgmt.current_difficulty)?;
 
         self_
             .safe_lock(|d| {
@@ -34,11 +27,10 @@ impl Downstream {
             })
             .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
-        let (message, _) = target_to_sv1_message(
-            crate::EXPECTED_SV1_HASHPOWER.into(),
-            crate::SHARE_PER_MIN.into(),
-        )?;
+        let (message, _) = diff_to_sv1_message(diff as f64)?;
         Downstream::send_message_downstream(self_.clone(), message).await;
+
+        tokio::spawn(crate::translator::utils::check_share_rate_limit());
 
         Ok(())
     }
@@ -66,53 +58,35 @@ impl Downstream {
         Ok(())
     }
 
-    /// Calculate the new estimated downstream hashrate. And if is worth an update, update the
-    /// downstream and the bridge. There is an hard limiti set by MIN_SV1_DOWSNTREAM_HASHRATE to
-    /// avoid being flowed by millions of shares.
+    /// Checks the downstream's difficulty based on recent share submissions. And if is worth an update, update the
+    /// downstream and the bridge.
     pub async fn try_update_difficulty_settings(
         self_: &Arc<Mutex<Self>>,
         last_notify: Option<Notify<'static>>,
     ) -> ProxyResult<'static, ()> {
-        let (down_diff_config, channel_id) = self_
+        let channel_id = self_
             .clone()
-            .safe_lock(|d| (d.difficulty_mgmt.clone(), d.connection_id))
+            .safe_lock(|d| (d.connection_id))
             .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
-        let prev_target = hash_rate_to_target(
-            down_diff_config.estimated_downstream_hash_rate.into(),
-            down_diff_config.shares_per_minute.into(),
-        )
-        .map_err(Error::TargetError)?;
-
-        if let Some(estimated_hash_rate) = Self::update_downstream_hashrate(self_, prev_target)? {
-            let estimated_hash_rate =
-                f32::max(estimated_hash_rate, crate::MIN_SV1_DOWSNTREAM_HASHRATE);
-            Self::update_diff_setting(
-                self_,
-                down_diff_config.shares_per_minute,
-                channel_id,
-                estimated_hash_rate,
-                last_notify,
-            )
-            .await?;
+        if let Some(new_diff) = Self::update_difficulty_and_hashrate(self_)? {
+            Self::update_diff_setting(self_, channel_id, new_diff.into(), last_notify).await?;
         }
         Ok(())
     }
 
-    /// 1. Calculate the new target given the share per minute and the miner's hashrate.
-    /// 2. Get difficulty from target and send it downstream also send the last mining.notify
-    ///    sent so that downstream will hopefully immidiately update the target.
-    /// 3. Updated the channel that the bridge use to mirror this downstream.
+    /// This function:
+    /// 1. Sends new difficulty as a SV1 message.
+    /// 2. Resends the last `mining.notify` (if set).
+    /// 3. Notifying the bridge of the updated target for channel.
     async fn update_diff_setting(
         self_: &Arc<Mutex<Self>>,
-        shares_per_minute: f32,
         channel_id: u32,
-        estimated_hash_rate: f32,
+        new_diff: f64,
         last_notify: Option<Notify<'static>>,
     ) -> ProxyResult<'static, ()> {
         // Send messages downstream
-        let (message, target) =
-            target_to_sv1_message(estimated_hash_rate.into(), shares_per_minute.into())?;
+        let (message, target) = diff_to_sv1_message(new_diff)?;
         Downstream::send_message_downstream(self_.clone(), message).await;
 
         if let Some(notify) = last_notify {
@@ -140,169 +114,143 @@ impl Downstream {
         Ok(())
     }
 
-    /// Convert a target into a `SetDifficulty` message.
-    fn get_set_difficulty(target: [u8; 32]) -> json_rpc::Message {
-        let value = Downstream::difficulty_from_target(target);
-        let set_difficulty = SetDifficulty { value };
-        let message: json_rpc::Message = set_difficulty.into();
-        message
-    }
+    /// Converts difficulty to a 256-bit target.
+    /// The target T is calculated as T = pdiff / D, where pdiff is the maximum target
+    fn difficulty_to_target(difficulty: f32) -> [u8; 32] {
+        let difficulty = f32::max(difficulty, 0.001);
 
-    /// Convert a target into a dfficulty.
-    fn difficulty_from_target(mut target: [u8; 32]) -> f64 {
-        // Reverse because target is LE and this function relies on BE.
-        target.reverse();
-
-        // If received target is 0, return 0.
-        if Downstream::is_zero(target.as_ref()) {
-            warn!("Target is 0");
-            return 0.0;
-        }
-        let target = Uint256::from_be_bytes(target);
         let pdiff: [u8; 32] = [
             0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
         ];
         let pdiff = Uint256::from_be_bytes(pdiff);
+        let scale: u128 = 1_000_000; // 10^6, is enough for min difficulty of 0.001
 
-        if pdiff > target {
-            let diff = pdiff.div(target);
-            diff.low_u64() as f64
-        } else {
-            0.01
+        // To handle the floating-point diff and `pdiff`, we scale it by 10^6 (1_000_000) to convert it to an integer
+        // For example, if difficulty is 0.001:
+        //   diff_int = 0.001 * 1e6 = 1_000
+        let scaled_difficulty = difficulty * (scale as f32);
+
+        if scaled_difficulty > (u128::MAX as f32) {
+            panic!("Difficulty too large: scaled value exceeds u128 maximum");
         }
+        let diff: u128 = scaled_difficulty as u128;
+
+        let diff = from_u128_to_uint256(diff);
+        let scale = from_u128_to_uint256(scale);
+
+        let target = pdiff * scale / diff;
+        let mut target = target.to_be_bytes();
+
+        target.reverse(); // Convert to little-endian for SV1
+        target
     }
 
-    /// Helper function to check if target is set to zero for some reason (typically happens when
-    /// Downstream role first connects).
-    /// https://stackoverflow.com/questions/65367552/checking-a-vecu8-to-see-if-its-all-zero
-    fn is_zero(buf: &[u8]) -> bool {
-        let (prefix, aligned, suffix) = unsafe { buf.align_to::<u128>() };
-
-        prefix.iter().all(|&x| x == 0)
-            && suffix.iter().all(|&x| x == 0)
-            && aligned.iter().all(|&x| x == 0)
-    }
-
-    /// This function updates the miner hashrate and resets difficulty management params.
-    /// To calculate hashrate it calculates the realized shares per minute from the number of
-    /// shares submitted and the delta time since last update. It then uses the realized shares per
-    /// minute and the target those shares where mined on to calculate an estimated hashrate during
-    /// that period with the function [`roles_logic_sv2::utils::hash_rate_from_target`].
-    /// Lastly, it adjusts the `channel_nominal_hashrate` according to the change in estimated
-    /// miner hashrate
-    pub fn update_downstream_hashrate(
+    /// 1. Calculates the realized share rate since the last update.
+    /// 2. Adjusts difficulty using a PID controller, with aggressive tuning for zero-share cases over 5 secs.
+    /// 3. Estimates a new hash rate and updates the miner’s state if a change is needed.
+    ///
+    /// Returns `Some(new_difficulty)` if updated, or `None` if no update is needed.
+    pub fn update_difficulty_and_hashrate(
         self_: &Arc<Mutex<Self>>,
-        miner_target: U256<'static>,
     ) -> ProxyResult<'static, Option<f32>> {
         let timestamp_millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time went backwards")
             .as_millis();
-        let (difficulty_mgmt, last_call) =
-            &self_.safe_lock(|d| (d.difficulty_mgmt.clone(), d.last_call_to_update_hr))?;
-        let time_delta_millis = timestamp_millis - difficulty_mgmt.timestamp_of_last_update;
 
-        // Check if last time that this fn have been called is less than 1 second ago.
-        // If it is retunr Ok(None).
-        // If it is not continue.
-        if *last_call != 0 && (timestamp_millis - last_call) < 1000 {
-            return Ok(None);
+        let (difficulty_mgmt, last_call) =
+            self_.safe_lock(|d| (d.difficulty_mgmt.clone(), d.last_call_to_update_hr))?;
+
+        let time_delta_millis = timestamp_millis - difficulty_mgmt.timestamp_of_last_update;
+        if time_delta_millis < 1000 || (timestamp_millis - last_call) < 1000 {
+            return Ok(None); // Avoid too frequent updates
         }
+
         if time_delta_millis == 0 {
-            return Ok(None);
+            return Ok(None); // No time elapsed
         }
+
         self_.safe_lock(|d| d.last_call_to_update_hr = timestamp_millis)?;
 
-        // This should have already been checked in the caller fn, no need to check it again
-        assert!(difficulty_mgmt.timestamp_of_last_update != 0);
+        let realized_share_per_min = difficulty_mgmt.submits_since_last_update as f32
+            / (time_delta_millis as f32 / (60.0 * 1000.0));
 
-        let realized_share_per_min = difficulty_mgmt.submits_since_last_update as f64
-            / (time_delta_millis as f64 / (60.0 * 1000.0));
-
-        // We received too few shares in the interval to estimate a correct hashrate. If delta_time
-        // is big enaugh we just try with last estimated hash rate divided by 1.5.
-        if realized_share_per_min.is_nan() {
-            error!("realized_share_per_min should not be nan");
-            Err(Error::Unrecoverable)
-        } else if realized_share_per_min == 0.0 || realized_share_per_min.is_infinite() {
-            if time_delta_millis < 5 * 1000 {
-                Ok(None)
-            } else {
-                let new_estimation = difficulty_mgmt.estimated_downstream_hash_rate as f64 / 1.5;
-                Self::update_self_with_new_hash_rate(
-                    self_,
-                    timestamp_millis,
-                    new_estimation as f32,
-                )?;
-                Ok(Some(new_estimation as f32))
-            }
-        } else if realized_share_per_min.is_sign_negative() {
+        if realized_share_per_min.is_sign_negative() {
             error!("realized_share_per_min should not be negative");
             return Err(Error::Unrecoverable);
-        } else {
-            let (target, share_per_minute) =
-                sanitize_share_per_min(miner_target, realized_share_per_min);
-            let new_estimation = hash_rate_from_target(target, share_per_minute)?;
+        }
+        if realized_share_per_min.is_nan() {
+            error!("realized_share_per_min should not be nan");
+            return Err(Error::Unrecoverable);
+        }
 
-            if let Some(new_estimation) = Self::refine_new_estimation(
-                time_delta_millis,
-                difficulty_mgmt.estimated_downstream_hash_rate as f64,
+        let (mut pid, current_difficulty) = self_.safe_lock(|d| {
+            (
+                d.difficulty_mgmt.pid_controller,
+                d.difficulty_mgmt.current_difficulty,
+            )
+        })?;
+
+        if realized_share_per_min == 0.0 || realized_share_per_min.is_infinite() {
+            if time_delta_millis < 5 * 1000 {
+                return Ok(None); // Wait at least 5 secs
+            }
+            // If relized_share_per is 0 or infinite after 5secs,
+            // it means that the diff is eithr too small or too big.
+            // So the current diff is far off from ideal diff for the miner
+            // To correct this, increase p and i so that it adjusts diff more aggressively
+
+            // Adjust difficulty by approx 50%
+            let change = -0.50 * current_difficulty;
+            // Set p_gain to be ratio of the change to the current error
+            let p_gain = change / (pid.setpoint - realized_share_per_min);
+            pid.p(p_gain, pid.output_limit);
+            pid.i(p_gain / 10.0, pid.output_limit);
+            pid.d(0.1, pid.output_limit);
+        }
+        let pid_output = pid.next_control_output(realized_share_per_min).output;
+        let new_difficulty = (current_difficulty + pid_output).max(0.001);
+
+        // Check that differnce in difficulty is significant or enough time has passed to update
+        let threshold = 0.05;
+        let change = (new_difficulty - current_difficulty).abs() / current_difficulty;
+        let time_delta_secs = time_delta_millis / 1000;
+        if change > threshold || time_delta_secs >= 10 {
+            let new_estimation =
+                Self::estimate_hash_rate_from_difficulty(new_difficulty, realized_share_per_min);
+            Self::update_self_with_new_hash_rate(
+                self_,
+                timestamp_millis,
                 new_estimation,
-            ) {
-                Self::update_self_with_new_hash_rate(
-                    self_,
-                    timestamp_millis,
-                    new_estimation as f32,
-                )?;
-                Ok(Some(new_estimation as f32))
-            } else {
-                Ok(None)
-            }
-        }
-    }
-
-    fn refine_new_estimation(
-        time_delta_millis: u128,
-        old_estimation: f64,
-        new_estimation: f64,
-    ) -> Option<f64> {
-        let time_delata_secs = time_delta_millis / 1000;
-
-        let hashrate_delta = new_estimation - old_estimation;
-        let hashrate_delta_percentage = (hashrate_delta.abs() / old_estimation) * 100.0;
-
-        if (hashrate_delta_percentage >= 80.0)
-            || (hashrate_delta_percentage >= 60.0) && (time_delata_secs >= 60)
-            || (hashrate_delta_percentage >= 50.0) && (time_delata_secs >= 120)
-            || (hashrate_delta_percentage >= 45.0) && (time_delata_secs >= 180)
-            || (hashrate_delta_percentage >= 30.0) && (time_delata_secs >= 240)
-            || (hashrate_delta_percentage >= 15.0) && (time_delata_secs >= 300)
-        {
-            if hashrate_delta_percentage > 1000.0 {
-                let new_estimation = match time_delata_secs {
-                    dt if dt <= 30 => old_estimation * 10.0,
-                    dt if dt < 60 => old_estimation * 5.0,
-                    _ => old_estimation * 3.0,
-                };
-                Some(new_estimation)
-            } else {
-                Some(new_estimation)
-            }
+                new_difficulty,
+            )?;
+            Ok(Some(new_difficulty))
         } else {
-            None
+            Ok(None)
         }
     }
+
+    /// Estimates a miner's hash rate from its difficulty and share submission rate.
+    /// Uses the formula: hash_rate = shares_per_second * difficulty * 2^32.
+    fn estimate_hash_rate_from_difficulty(difficulty: f32, share_per_min: f32) -> f32 {
+        let share_per_second = share_per_min / 60.0;
+        share_per_second * difficulty * 2f32.powi(32)
+    }
+
+    /// Updates the downstream miner's difficulty mgmt states and adjusts the upstream channel's nominal
     fn update_self_with_new_hash_rate(
         self_: &Arc<Mutex<Self>>,
         now: u128,
         new_estimation: f32,
+        current_diff: f32,
     ) -> ProxyResult<'static, ()> {
         let (upstream_difficulty_config, old_estimation) = self_.safe_lock(|d| {
             let old_estimation = d.difficulty_mgmt.estimated_downstream_hash_rate;
             d.difficulty_mgmt.estimated_downstream_hash_rate = new_estimation;
             d.difficulty_mgmt.timestamp_of_last_update = now;
             d.difficulty_mgmt.submits_since_last_update = 0;
+            d.difficulty_mgmt.current_difficulty = current_diff;
             (d.upstream_difficulty_config.clone(), old_estimation)
         })?;
         let hash_rate_delta = new_estimation - old_estimation;
@@ -317,69 +265,21 @@ impl Downstream {
     }
 }
 
-// `sanitize_share_per_min` function does 2 things:
-// 1. Makes sure that `share_per_min` is at least 1.
-// 2. Prevents overflow if `target` is at maximum (U256)
-//
-// Advantages
-// - Simple and stable
-// - Keeps difficulty within reasonable range
-//
-// Impact on Difficulty
-// - It may slightly increase difficulty, making it less flexibile for miners with low hashpower.
-// For example, a miner submitting 1 share every 2 minutes has `share_per_min` as  0.5
-// Enforcing a minimum of 1 for `share_per_min` will raise the difficulty
-//
-// Trade-off: Stability vs. precision in difficulty adjustments.
-pub fn sanitize_share_per_min(
-    miner_target: U256<'static>,
-    mut share_per_min: f64,
-) -> (U256<'static>, f64) {
-    // share_per_min should be at least 1
-    share_per_min = share_per_min.max(1.0);
-
-    let mut target_arr: [u8; 32] = [0; 32];
-    target_arr
-        .as_mut()
-        .copy_from_slice(miner_target.inner_as_ref());
-    target_arr.reverse();
-
-    let mut target = Uint256::from_be_bytes(target_arr);
-
-    let max_target = Uint256::from_be_bytes([255_u8; 32]);
-
-    if target == max_target {
-        // Subtract 1, so that `target_plus_one` in `hash_rate_from_target` will not overflow
-        target = target.sub(Uint256::one());
-    }
-    let mut target = target.to_be_bytes();
-    target.reverse();
-
-    (target.into(), share_per_min)
-}
-
-fn target_to_sv1_message(
-    hash_power: f64,
-    share_per_min: f64,
-) -> ProxyResult<'static, (json_rpc::Message, [u8; 32])> {
-    let target = match hash_rate_to_target(hash_power, share_per_min) {
-        Ok(target) => Ok(target),
-        Err(v) => Err(Error::TargetError(v)),
-    }?;
-    let target: [u8; 32] = target
-        .inner_as_ref()
-        .try_into()
-        .expect("Should always be 32 bytes");
-    Ok((Downstream::get_set_difficulty(target), target))
+// Converts difficulty to SV1 `SetDifficulty` message and corresponding target.
+/// Returns JSON-RPC message and the target.
+fn diff_to_sv1_message(diff: f64) -> ProxyResult<'static, (json_rpc::Message, [u8; 32])> {
+    let set_difficulty = SetDifficulty { value: diff };
+    let message: json_rpc::Message = set_difficulty.into();
+    let target = Downstream::difficulty_to_target(diff as f32);
+    Ok((message, target))
 }
 
 #[cfg(test)]
 mod test {
     use super::super::super::upstream::diff_management::UpstreamDifficultyConfig;
-    use crate::translator::downstream::{
-        diff_management::sanitize_share_per_min, downstream::DownstreamDifficultyConfig, Downstream,
-    };
+    use crate::translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream};
     use binary_sv2::U256;
+    use pid::Pid;
     use rand::{thread_rng, Rng};
     use roles_logic_sv2::{mining_sv2::Target, utils::Mutex};
     use sha2::{Digest, Sha256};
@@ -428,40 +328,6 @@ mod test {
     fn get_error(lambda: f64) -> f64 {
         let z_score_99 = 2.576;
         z_score_99 * lambda.sqrt()
-    }
-
-    #[test]
-    fn test_safe_share_per_min_with_low_val() {
-        // share_per_min < 1.0 should be adjusted to 1.0
-
-        let target = U256::from([100_u8; 32]);
-        let share_per_min = 0.005;
-
-        // Call safe_target
-        let (_, new_share_per_min) = sanitize_share_per_min(target, share_per_min);
-
-        // Validate that share_per_min was correctly adjusted
-        assert_eq!(
-            new_share_per_min, 1.0,
-            "share_per_min should be adjusted to 1.0 to prevent division issues."
-        );
-    }
-
-    #[test]
-    fn test_safe_share_per_min_with_big_val() {
-        // share_per_min < 1.0 should be adjusted to 1.0
-
-        let target = U256::from([100_u8; 32]);
-        let share_per_min = 50.0;
-
-        // Call safe_target
-        let (_, new_share_per_min) = sanitize_share_per_min(target, share_per_min);
-
-        // Validate that share_per_min was correctly adjusted
-        assert_eq!(
-            new_share_per_min, 50.0,
-            "share_per_min should not be adjusted if it's already valid."
-        );
     }
 
     fn mock_mine(target: Target, share: &mut [u8; 80]) {
@@ -522,9 +388,10 @@ mod test {
     async fn test_converge_to_spm(start_hashrate: f64) {
         let downstream_conf = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate: 0.0, // updated below
-            shares_per_minute: 1000.0,           // 1000 shares per minute
             submits_since_last_update: 0,
             timestamp_of_last_update: 0, // updated below
+            pid_controller: Pid::new(10.0, 100_000_000.0),
+            current_difficulty: 10_000_000_000.0,
         };
         let upstream_config = UpstreamDifficultyConfig {
             channel_diff_update_interval: 60,
@@ -548,7 +415,7 @@ mod test {
         downstream.difficulty_mgmt.estimated_downstream_hash_rate = start_hashrate as f32;
 
         let total_run_time = std::time::Duration::from_secs(10);
-        let config_shares_per_minute = downstream_conf.shares_per_minute;
+        let config_shares_per_minute = crate::SHARE_PER_MIN;
         let timer = std::time::Instant::now();
         let mut elapsed = std::time::Duration::from_secs(0);
 

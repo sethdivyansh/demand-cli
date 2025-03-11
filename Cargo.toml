@@ -13,11 +13,12 @@ futures = "*"
 async-recursion = "1.0.0"
 lazy_static = "1.4.0"
 rand = "0.8.4"
-jemallocator = "*"
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "*", features = ["env-filter"]}
 tokio = {version="^1.36.0",features = ["full","tracing"]}
 key-utils = "1.0.0"
+pid ={ version = "4.0.0"}
+clap={version = "4.5.31", features = ["derive"]}
 #roles_logic_sv2 = "1.2.1"
 #sv1_api = "1.0.1"
 #demand-sv2-connection = "0.0.3"
@@ -62,3 +63,5 @@ panic = 'abort'
 [profile.dev]
 panic = 'abort'
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+jemallocator = "*"

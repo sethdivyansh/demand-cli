@@ -160,6 +160,24 @@ impl Router {
         let setup_connection_msg = self.setup_connection_msg.as_ref();
         let timer = self.timer.as_ref();
         let auth_pub_key = self.auth_pub_k;
+
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            PoolLatency::get_mining_setup_latencies(
+                &mut pool,
+                setup_connection_msg.cloned(),
+                timer.cloned(),
+                auth_pub_key,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            error!(
+                "Failed to get mining setup latencies for {:?}: Timeout",
+                pool_address
+            );
+        })??;
+
         if (PoolLatency::get_mining_setup_latencies(
             &mut pool,
             setup_connection_msg.cloned(),
@@ -243,8 +261,8 @@ impl PoolLatency {
     ) -> Result<(), ()> {
         // Set open_sv2_mining_connection latency
         let open_sv2_mining_connection_timer = Instant::now();
-        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(self.pool)).await {
-            Ok(Ok(stream)) => {
+        match TcpStream::connect(self.pool).await {
+            Ok(stream) => {
                 self.open_sv2_mining_connection = Some(open_sv2_mining_connection_timer.elapsed());
 
                 let (mut receiver, mut sender, setup_connection_msg) =
@@ -313,10 +331,19 @@ impl PoolLatency {
 
                         Ok(())
                     }
-                    Err(_) => Err(()),
+                    Err(e) => {
+                        error!(
+                            "Failed to get mining setup latency for pool {}: {:?}",
+                            self.pool, e
+                        );
+                        Err(())
+                    }
                 }
             }
-            _ => Err(()),
+            _ => {
+                error!("Failed to get mining setup latencies for: {:?}", self.pool);
+                Err(())
+            }
         }
     }
 

@@ -17,14 +17,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Update POOL_ADDRESS in src/main.rs
-        run: |
-          sed -i 's/mining\.dmnd\.work:2000/k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000/g' src/main.rs
-
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          rust-version: stable
 
       - name: Build Linux Binary
         run: cargo build --release
@@ -45,14 +39,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # BSD sed requires an empty string after -i.
-      - name: Update POOL_ADDRESS in src/main.rs
-        run: sed -i '' 's/mining\.dmnd\.work:2000/k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000/g' src/main.rs
-
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          rust-version: stable
 
       - name: Build macOS Binary
         run: cargo build --release
@@ -66,9 +54,31 @@ jobs:
           name: macos-artifact
           path: demand-cli-macos
 
+  build-windows:
+    name: Build Windows Binary
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Windows Binary
+        run: cargo build --release
+
+      - name: Rename Windows Binary
+        run: move target\release\demand-cli.exe demand-cli-windows.exe
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifact
+          path: demand-cli-windows.exe
+
   create-release:
     name: Create GitHub Release and Upload Binaries
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -76,8 +86,6 @@ jobs:
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          rust-version: stable
 
       - name: Install cargo-release
         run: cargo install cargo-release
