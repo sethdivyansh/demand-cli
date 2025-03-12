@@ -33,7 +33,7 @@ pub async fn start_accept_connection(
             while let Some((send, recv, addr)) = downstreams.recv().await {
                 info!("Translator opening connection for ip {}", addr);
                 // TODO handle also cases where a cpuminer want to connect
-                let expected_hash_rate = crate::EXPECTED_SV1_HASHPOWER;
+                let expected_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
                 if Bridge::ready(&bridge).await.is_err() {
                     error!("Bridge not ready");
                     break;
