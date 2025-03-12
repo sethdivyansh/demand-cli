@@ -377,7 +377,7 @@ impl HashUnit {
         } else if hashrate >= 1e12 {
             format!("{:.2}T", hashrate / 1e12)
         } else {
-            format!("{:.2}", hashrate) // Raw number if below 1T (unlikely)
+            format!("{:.2}", hashrate)
         }
     }
 }
