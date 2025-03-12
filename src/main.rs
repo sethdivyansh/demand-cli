@@ -13,7 +13,7 @@ use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
 use std::{net::ToSocketAddrs, time::Duration};
 use tokio::sync::mpsc::channel;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod ingress;
 pub mod jd_client;
@@ -32,10 +32,10 @@ const DEFAULT_SV1_HASHPOWER: f32 = 100_000_000_000_000.0;
 const SHARE_PER_MIN: f32 = 10.0;
 const CHANNEL_DIFF_UPDTATE_INTERVAL: u32 = 10;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
-const POOL_ADDRESS: &str = "mining.dmnd.work:2000";
+const MAIN_POOL_ADDRESS: &str = "mining.dmnd.work:2000";
 const TEST_POOL_ADDRESS: &str =
     "k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000";
-const AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
+const MAIN_AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
 const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 //const TP_ADDRESS: &str = "127.0.0.1:8442";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
@@ -50,6 +50,19 @@ lazy_static! {
         .unwrap_or(DEFAULT_SV1_HASHPOWER);
 }
 
+lazy_static! {
+    static ref ARGS: Args = Args::parse();
+    pub static ref POOL_ADDRESS: &'static str = if ARGS.test {
+        TEST_POOL_ADDRESS
+    } else {
+        MAIN_POOL_ADDRESS
+    };
+    pub static ref AUTH_PUB_KEY: &'static str = if ARGS.test {
+        TEST_AUTH_PUB_KEY
+    } else {
+        MAIN_AUTH_PUB_KEY
+    };
+}
 #[derive(Parser)]
 struct Args {
     // Use test enpoint if test flag is provided
@@ -71,39 +84,26 @@ async fn main() {
         ))
         .init();
     std::env::var("TOKEN").expect("Missing TOKEN environment variable");
-    let args = Args::parse();
-
-    // Select the endpoint based on the --test flag
-    let pool_address = if args.test {
-        info!("Connecting to test endpoint...");
-        TEST_POOL_ADDRESS
-    } else {
-        POOL_ADDRESS
-    };
-
-    // Select the pubkey based on the --test flag
-    let auth_pub_key = if args.test {
-        TEST_AUTH_PUB_KEY
-    } else {
-        AUTH_PUB_KEY
-    };
 
     let hashpower = *EXPECTED_SV1_HASHPOWER;
-
+    let args = Args::parse();
     if args.downstream_hashrate.is_some() {
         info!(
             "Using downstream hashrate: {}h/s",
             HashUnit::format_value(hashpower)
         );
     } else {
-        info!(
+        warn!(
             "No downstream hashrate provided, using default value: {}h/s",
             HashUnit::format_value(hashpower)
         );
     }
+    if args.test {
+        info!("Connecting to test endpoint...");
+    }
 
-    let auth_pub_k: Secp256k1PublicKey = auth_pub_key.parse().expect("Invalid public key");
-    let address = pool_address
+    let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let address = POOL_ADDRESS
         .to_socket_addrs()
         .expect("Invalid pool address")
         .next()
