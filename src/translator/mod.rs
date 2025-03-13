@@ -86,7 +86,7 @@ pub async fn start(
 
     let upstream_diff = UpstreamDifficultyConfig {
         channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
-        channel_nominal_hashrate: crate::EXPECTED_SV1_HASHPOWER,
+        channel_nominal_hashrate: *crate::EXPECTED_SV1_HASHPOWER,
     };
     let diff_config = Arc::new(Mutex::new(upstream_diff));
 
