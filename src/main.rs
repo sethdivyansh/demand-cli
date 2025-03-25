@@ -70,23 +70,52 @@ struct Args {
     test: bool,
     #[clap(long ="d", short ='d', value_parser = parse_hashrate)]
     downstream_hashrate: Option<f32>,
+    #[clap(long = "loglevel", short = 'l', default_value = "info")]
+    loglevel: String,
+    #[clap(long = "nc", short = 'n', default_value = "off")]
+    noise_connection_log: String,
 }
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+
+    let log_level = match args.loglevel.to_lowercase().as_str() {
+        "trace" | "debug" | "info" | "warn" | "error" => args.loglevel,
+        _ => {
+            error!(
+                "Invalid log level '{}'. Defaulting to 'info'.",
+                args.loglevel
+            );
+            "info".to_string()
+        }
+    };
+
+    let noise_connection_log_level = match args.noise_connection_log.as_str() {
+        "trace" | "debug" | "info" | "warn" | "error" => args.noise_connection_log,
+        _ => {
+            error!(
+                "Invalid log level for noise_connection '{}' Defaulting to 'off'.",
+                args.noise_connection_log
+            );
+            "off".to_string()
+        }
+    };
+
     //Disable noise_connection error (for now) because:
     // 1. It produce logs that are not very user friendly and also bloat the logs
     // 2. The errors resulting from noise_connection are handled. E.g if unrecoverable error from noise connection occurs during Pool connection: We either retry connecting immediatley or we update Proxy state to Pool Down
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::EnvFilter::new(
-            "info,demand_sv2_connection::noise_connection_tokio=off",
-        ))
+        .with(tracing_subscriber::EnvFilter::new(format!(
+            "{},demand_sv2_connection::noise_connection_tokio={}",
+            log_level, noise_connection_log_level
+        )))
         .init();
     std::env::var("TOKEN").expect("Missing TOKEN environment variable");
 
     let hashpower = *EXPECTED_SV1_HASHPOWER;
-    let args = Args::parse();
+
     if args.downstream_hashrate.is_some() {
         info!(
             "Using downstream hashrate: {}h/s",
