@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::shared::utils::AbortOnDrop;
@@ -17,6 +18,7 @@ enum Task {
 pub struct TaskManager {
     send_task: mpsc::Sender<Task>,
     abort: Option<AbortOnDrop>,
+    notify_tasks: HashMap<u32, AbortOnDrop>,
 }
 
 impl TaskManager {
@@ -35,6 +37,7 @@ impl TaskManager {
         Arc::new(Mutex::new(Self {
             send_task: sender,
             abort: Some(handle.into()),
+            notify_tasks: HashMap::new(),
         }))
     }
 
@@ -59,12 +62,20 @@ impl TaskManager {
             .await
             .map_err(|_| ())
     }
-    pub async fn add_notify(self_: Arc<Mutex<Self>>, abortable: AbortOnDrop) -> Result<(), ()> {
-        let send_task = self_.safe_lock(|s| s.send_task.clone()).unwrap();
-        send_task
-            .send(Task::Notify(abortable))
-            .await
-            .map_err(|_| ())
+    pub async fn add_notify(
+        self_: Arc<Mutex<Self>>,
+        connection_id: u32,
+        abortable: AbortOnDrop,
+    ) -> Result<(), ()> {
+        self_
+            .safe_lock(|s| {
+                s.notify_tasks.insert(connection_id, abortable);
+            })
+            .map_err(|_| ())?;
+        Ok(())
+    }
+    pub fn remove_notify(&mut self, connection_id: u32) {
+        if self.notify_tasks.remove(&connection_id).is_some() {}
     }
     pub async fn add_send_downstream(
         self_: Arc<Mutex<Self>>,

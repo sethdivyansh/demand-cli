@@ -63,7 +63,7 @@ pub async fn start_notify(
                     }
                     first_sent = true;
                 } else if is_a && last_notify.is_some() {
-                    if let Err(e) = start_update(task_manager, downstream.clone()).await {
+                    if let Err(e) = start_update(task_manager.clone(), downstream.clone()).await {
                         warn!("Translator impossible to start update task: {e}");
                         break;
                     };
@@ -98,14 +98,17 @@ pub async fn start_notify(
             }
             // TODO here we want to be sure that on drop this is called
             let _ = Downstream::remove_downstream_hashrate_from_channel(&downstream);
-            // TODO here we want to kill the tasks
             warn!(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host
             );
+            // Remove the notify task from TaskManager on disconnect.
+            let _ = task_manager.safe_lock(|tm| {
+                tm.remove_notify(connection_id);
+            });
         })
     };
-    TaskManager::add_notify(task_manager, handle.into())
+    TaskManager::add_notify(task_manager, connection_id, handle.into())
         .await
         .map_err(|_| Error::TranslatorTaskManagerFailed)
 }
