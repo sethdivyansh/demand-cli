@@ -2,6 +2,7 @@ use crate::{
     proxy_state::{DownstreamType, ProxyState},
     shared::utils::AbortOnDrop,
     translator::{
+        downstream::diff_management::nearest_power_of_10,
         error::Error,
         utils::{allow_submit_share, validate_share},
     },
@@ -27,7 +28,7 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 
-use std::{net::IpAddr, sync::Arc};
+use std::{collections::VecDeque, net::IpAddr, sync::Arc};
 use sv1_api::{
     client_to_server, json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be},
@@ -38,10 +39,37 @@ use tracing::{error, info, warn};
 #[derive(Debug, Clone)]
 pub struct DownstreamDifficultyConfig {
     pub estimated_downstream_hash_rate: f32,
-    pub submits_since_last_update: u32,
-    pub timestamp_of_last_update: u128,
+    pub submits: VecDeque<std::time::Instant>,
     pub pid_controller: Pid<f32>,
     pub current_difficulty: f32,
+    pub initial_difficulty: f32,
+}
+
+impl DownstreamDifficultyConfig {
+    pub fn share_count(&mut self) -> Option<f32> {
+        let now = std::time::Instant::now();
+        if self.submits.is_empty() {
+            return Some(0.0);
+        }
+        let oldest = self.submits[0];
+        if now - oldest < std::time::Duration::from_secs(20) {
+            return None;
+        }
+        if now - oldest < std::time::Duration::from_secs(60) {
+            let elapsed = now - oldest;
+            Some(self.submits.len() as f32 / (elapsed.as_millis() as f32 / (60.0 * 1000.0)))
+        } else {
+            self.submits.pop_front();
+            self.share_count()
+        }
+    }
+    pub fn on_new_valid_share(&mut self) {
+        self.submits.push_back(std::time::Instant::now());
+    }
+
+    pub fn reset(&mut self) {
+        self.submits.clear();
+    }
 }
 
 impl PartialEq for DownstreamDifficultyConfig {
@@ -102,7 +130,8 @@ impl Downstream {
         // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32),
         let initial_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
         let share_per_second = crate::SHARE_PER_MIN / 60.0;
-        let initial_difficulty = initial_hash_rate / (share_per_second * 2f32.powf(32.0));
+        let initial_difficulty = dbg!(initial_hash_rate / (share_per_second * 2f32.powf(32.0)));
+        let initial_difficulty = nearest_power_of_10(initial_difficulty);
 
         // The PID controller uses negative proportional (P) and integral (I) gains to reduce difficulty
         // when the actual share rate falls below the target rate (SHARE_PER_MIN). Negative gains are chosen
@@ -126,18 +155,19 @@ impl Downstream {
         // The positive D gain (0.05) dampens rapid changes, e.g., if share rate jumps from 8 to 12, D might
         // add a small positive adjustment to prevent overshooting.
 
-        let output_limit = initial_hash_rate * 0.5;
-        let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, output_limit);
-        pid.p(-10.0, output_limit)
-            .i(1.0, output_limit)
-            .d(0.1, output_limit);
+        let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, initial_difficulty * 10.0);
+        let pk = -initial_difficulty * 0.01;
+        //let pi = initial_difficulty * 0.1;
+        //let pd = initial_difficulty * 0.01;
+        pid.p(pk, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
 
+        let estimated_downstream_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
         let difficulty_mgmt = DownstreamDifficultyConfig {
-            estimated_downstream_hash_rate: *crate::EXPECTED_SV1_HASHPOWER,
-            submits_since_last_update: 0,
-            timestamp_of_last_update: 0,
+            estimated_downstream_hash_rate,
+            submits: vec![].into(),
             pid_controller: pid,
             current_difficulty: initial_difficulty,
+            initial_difficulty,
         };
 
         let downstream = Arc::new(Mutex::new(Downstream {

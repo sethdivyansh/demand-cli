@@ -21,6 +21,11 @@ pub async fn start_notify(
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
+        let upstream_difficulty_config =
+            downstream.safe_lock(|d| d.upstream_difficulty_config.clone())?;
+        upstream_difficulty_config.safe_lock(|c| {
+            c.channel_nominal_hashrate += *crate::EXPECTED_SV1_HASHPOWER;
+        })?;
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut first_sent = false;
@@ -123,9 +128,10 @@ async fn start_update(
             let sleep_duration = if share_count >= crate::SHARE_PER_MIN * 3.0
                 || share_count <= crate::SHARE_PER_MIN / 3.0
             {
-                std::time::Duration::from_millis(2_000)
+                std::time::Duration::from_millis(5000)
             } else {
-                std::time::Duration::from_millis(20_000)
+                // TODO we really need to use differenet times seems to work well enaugh with 5 sec
+                std::time::Duration::from_millis(5000)
             };
 
             tokio::time::sleep(sleep_duration).await;
