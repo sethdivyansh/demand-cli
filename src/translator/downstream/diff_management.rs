@@ -1,4 +1,5 @@
 use super::{Downstream, DownstreamMessages, SetDownstreamTarget};
+use pid::Pid;
 use roles_logic_sv2::{self, utils::from_u128_to_uint256};
 use sv1_api::{self, methods::server_to_client::SetDifficulty, server_to_client::Notify};
 
@@ -15,18 +16,7 @@ impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
     pub async fn init_difficulty_management(self_: &Arc<Mutex<Self>>) -> ProxyResult<()> {
-        let timestamp_millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_millis();
         let diff = self_.safe_lock(|d| d.difficulty_mgmt.current_difficulty)?;
-
-        self_
-            .safe_lock(|d| {
-                d.difficulty_mgmt.timestamp_of_last_update = timestamp_millis;
-                d.difficulty_mgmt.submits_since_last_update = 0;
-            })
-            .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
         let (message, _) = diff_to_sv1_message(diff as f64)?;
         Downstream::send_message_downstream(self_.clone(), message).await;
@@ -110,7 +100,7 @@ impl Downstream {
     /// Increments the number of shares since the last difficulty update.
     pub(super) fn save_share(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
         self_.safe_lock(|d| {
-            d.difficulty_mgmt.submits_since_last_update += 1;
+            d.difficulty_mgmt.on_new_valid_share();
         })?;
         Ok(())
     }
@@ -161,22 +151,16 @@ impl Downstream {
             .expect("time went backwards")
             .as_millis();
 
-        let (difficulty_mgmt, last_call) =
+        let (mut difficulty_mgmt, _last_call) =
             self_.safe_lock(|d| (d.difficulty_mgmt.clone(), d.last_call_to_update_hr))?;
-
-        let time_delta_millis = timestamp_millis - difficulty_mgmt.timestamp_of_last_update;
-        if time_delta_millis < 1000 || (timestamp_millis - last_call) < 1000 {
-            return Ok(None); // Avoid too frequent updates
-        }
-
-        if time_delta_millis == 0 {
-            return Ok(None); // No time elapsed
-        }
 
         self_.safe_lock(|d| d.last_call_to_update_hr = timestamp_millis)?;
 
-        let realized_share_per_min = difficulty_mgmt.submits_since_last_update as f32
-            / (time_delta_millis as f32 / (60.0 * 1000.0));
+        let realized_share_per_min = match difficulty_mgmt.share_count() {
+            Some(value) => value,
+            // we need at least 2 seconds of data
+            None => return Ok(None),
+        };
 
         if realized_share_per_min.is_sign_negative() {
             error!("realized_share_per_min should not be negative");
@@ -187,49 +171,44 @@ impl Downstream {
             return Err(Error::Unrecoverable);
         }
 
-        let (mut pid, current_difficulty) = self_.safe_lock(|d| {
+        let (mut pid, current_difficulty, initial_difficulty) = self_.safe_lock(|d| {
             (
                 d.difficulty_mgmt.pid_controller,
                 d.difficulty_mgmt.current_difficulty,
+                d.difficulty_mgmt.initial_difficulty,
             )
         })?;
 
-        if realized_share_per_min == 0.0 || realized_share_per_min.is_infinite() {
-            if time_delta_millis < 5 * 1000 {
-                return Ok(None); // Wait at least 5 secs
-            }
-            // If relized_share_per is 0 or infinite after 5secs,
-            // it means that the diff is eithr too small or too big.
-            // So the current diff is far off from ideal diff for the miner
-            // To correct this, increase p and i so that it adjusts diff more aggressively
-
-            // Adjust difficulty by approx 50%
-            let change = -0.50 * current_difficulty;
-            // Set p_gain to be ratio of the change to the current error
-            let p_gain = change / (pid.setpoint - realized_share_per_min);
-            pid.p(p_gain, pid.output_limit);
-            pid.i(p_gain / 10.0, pid.output_limit);
-            pid.d(0.1, pid.output_limit);
-        }
         let pid_output = pid.next_control_output(realized_share_per_min).output;
-        let new_difficulty = (current_difficulty + pid_output).max(0.001);
+        let new_difficulty = (current_difficulty + pid_output).max(initial_difficulty * 0.1);
+        let nearest = nearest_power_of_10(new_difficulty);
+        if nearest != initial_difficulty {
+            let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, nearest * 10.0);
+            let pk = -nearest * 0.01;
+            //let pi = initial_difficulty * 0.1;
+            //let pd = initial_difficulty * 0.01;
+            pid.p(pk, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
+            self_.safe_lock(|d| {
+                d.difficulty_mgmt.initial_difficulty = nearest;
+                d.difficulty_mgmt.pid_controller = pid;
+            })?;
 
-        // Check that differnce in difficulty is significant or enough time has passed to update
-        let threshold = 0.05;
-        let change = (new_difficulty - current_difficulty).abs() / current_difficulty;
-        let time_delta_secs = time_delta_millis / 1000;
-        if change > threshold || time_delta_secs >= 10 {
             let new_estimation =
-                Self::estimate_hash_rate_from_difficulty(new_difficulty, realized_share_per_min);
-            Self::update_self_with_new_hash_rate(
-                self_,
-                timestamp_millis,
-                new_estimation,
-                new_difficulty,
-            )?;
-            Ok(Some(new_difficulty))
+                Self::estimate_hash_rate_from_difficulty(nearest, crate::SHARE_PER_MIN);
+            Self::update_self_with_new_hash_rate(self_, new_estimation, nearest)?;
+            Ok(Some(nearest))
         } else {
-            Ok(None)
+            // TODO check if we can improve stale share with a threshold here
+            let threshold = 0.0;
+            let change = (new_difficulty - current_difficulty).abs() / current_difficulty;
+            if change > threshold {
+                let new_estimation =
+                    Self::estimate_hash_rate_from_difficulty(new_difficulty, crate::SHARE_PER_MIN);
+                Self::update_self_with_new_hash_rate(self_, new_estimation, new_difficulty)?;
+                Ok(Some(new_difficulty))
+            } else {
+                Ok(None)
+            }
         }
     }
 
@@ -243,21 +222,19 @@ impl Downstream {
     /// Updates the downstream miner's difficulty mgmt states and adjusts the upstream channel's nominal
     fn update_self_with_new_hash_rate(
         self_: &Arc<Mutex<Self>>,
-        now: u128,
         new_estimation: f32,
         current_diff: f32,
     ) -> ProxyResult<'static, ()> {
         let (upstream_difficulty_config, old_estimation) = self_.safe_lock(|d| {
             let old_estimation = d.difficulty_mgmt.estimated_downstream_hash_rate;
             d.difficulty_mgmt.estimated_downstream_hash_rate = new_estimation;
-            d.difficulty_mgmt.timestamp_of_last_update = now;
-            d.difficulty_mgmt.submits_since_last_update = 0;
+            d.difficulty_mgmt.reset();
             d.difficulty_mgmt.current_difficulty = current_diff;
             (d.upstream_difficulty_config.clone(), old_estimation)
         })?;
         let hash_rate_delta = new_estimation - old_estimation;
         upstream_difficulty_config.safe_lock(|c| {
-            if c.channel_nominal_hashrate + hash_rate_delta > 0.0 {
+            if (c.channel_nominal_hashrate + hash_rate_delta) > 0.0 {
                 c.channel_nominal_hashrate += hash_rate_delta;
             } else {
                 c.channel_nominal_hashrate = 0.0;
@@ -286,6 +263,7 @@ mod test {
     use roles_logic_sv2::{mining_sv2::Target, utils::Mutex};
     use sha2::{Digest, Sha256};
     use std::{
+        collections::VecDeque,
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -390,10 +368,10 @@ mod test {
     async fn test_converge_to_spm(start_hashrate: f64) {
         let downstream_conf = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate: 0.0, // updated below
-            submits_since_last_update: 0,
-            timestamp_of_last_update: 0, // updated below
             pid_controller: Pid::new(10.0, 100_000_000.0),
             current_difficulty: 10_000_000_000.0,
+            submits: VecDeque::new(),
+            initial_difficulty: 10_000_000_000.0,
         };
         let upstream_config = UpstreamDifficultyConfig {
             channel_diff_update_interval: 60,
@@ -474,4 +452,12 @@ mod test {
     // TODO make a test where unknown donwstream is simulated and we do not wait for it to produce
     // a share but we try to updated the estimated hash power every 2 seconds and updated the
     // target consequentially this shuold start to provide shares within a normal amount of time
+}
+
+pub fn nearest_power_of_10(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.001;
+    }
+    let exponent = x.log10().round() as i32;
+    10f32.powi(exponent)
 }

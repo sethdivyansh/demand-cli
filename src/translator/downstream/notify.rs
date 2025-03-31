@@ -21,6 +21,11 @@ pub async fn start_notify(
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
+        let upstream_difficulty_config =
+            downstream.safe_lock(|d| d.upstream_difficulty_config.clone())?;
+        upstream_difficulty_config.safe_lock(|c| {
+            c.channel_nominal_hashrate += *crate::EXPECTED_SV1_HASHPOWER;
+        })?;
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut first_sent = false;
@@ -63,7 +68,9 @@ pub async fn start_notify(
                     }
                     first_sent = true;
                 } else if is_a && last_notify.is_some() {
-                    if let Err(e) = start_update(task_manager, downstream.clone()).await {
+                    if let Err(e) =
+                        start_update(task_manager, downstream.clone(), connection_id).await
+                    {
                         warn!("Translator impossible to start update task: {e}");
                         break;
                     };
@@ -113,10 +120,22 @@ pub async fn start_notify(
 async fn start_update(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
+    connection_id: u32,
 ) -> Result<(), Error<'static>> {
     let handle = task::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+            let share_count = crate::translator::utils::get_share_count(connection_id);
+            let sleep_duration = if share_count >= crate::SHARE_PER_MIN * 3.0
+                || share_count <= crate::SHARE_PER_MIN / 3.0
+            {
+                std::time::Duration::from_millis(5000)
+            } else {
+                // TODO we really need to use differenet times seems to work well enaugh with 5 sec
+                std::time::Duration::from_millis(5000)
+            };
+
+            tokio::time::sleep(sleep_duration).await;
+
             let ln = match downstream.safe_lock(|d| d.last_notify.clone()) {
                 Ok(ln) => ln,
                 Err(e) => {
