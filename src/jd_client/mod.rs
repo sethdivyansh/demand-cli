@@ -38,6 +38,8 @@ use tracing::{error, info};
 ///    between all the contexts is not necessary.
 pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 
+pub static IS_CUSTOM_JOB_SET: AtomicBool = AtomicBool::new(true);
+
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
 use std::{
