@@ -58,6 +58,9 @@ pub async fn start(
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
 ) -> Option<AbortOnDrop> {
+    // This will not work when we implement support for multiple upstream
+    IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
+    IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
     initialize_jd(receiver, sender, up_receiver, up_sender).await
 }
 

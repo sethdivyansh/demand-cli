@@ -225,11 +225,10 @@ impl JobDeclarator {
         coinbase_pool_output: Vec<u8>,
     ) -> Result<(), Error> {
         let now = std::time::Instant::now();
-        while !super::IS_CUSTOM_JOB_SET
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        while !super::IS_CUSTOM_JOB_SET.load(std::sync::atomic::Ordering::Acquire) {
             if now.elapsed().as_secs() > 30 {
                 error!("Failed to set custom job");
+                ProxyState::update_jd_state(JdState::Down);
                 return Err(Error::Unrecoverable);
             }
             tokio::task::yield_now().await;
