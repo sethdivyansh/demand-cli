@@ -21,11 +21,12 @@ pub async fn start_notify(
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
-        let upstream_difficulty_config =
-            downstream.safe_lock(|d| d.upstream_difficulty_config.clone())?;
+        let (upstream_difficulty_config, stats_sender) = downstream
+            .safe_lock(|d| (d.upstream_difficulty_config.clone(), d.stats_sender.clone()))?;
         upstream_difficulty_config.safe_lock(|c| {
             c.channel_nominal_hashrate += *crate::EXPECTED_SV1_HASHPOWER;
         })?;
+        stats_sender.setup_stats(connection_id);
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut first_sent = false;
