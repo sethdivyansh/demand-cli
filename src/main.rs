@@ -75,6 +75,8 @@ struct Args {
     loglevel: String,
     #[clap(long = "nc", short = 'n', default_value = "off")]
     noise_connection_log: String,
+    #[clap(long = "delay", default_value = "0")]
+    delay: u64,
 }
 
 #[tokio::main]
