@@ -167,6 +167,7 @@ async fn initialize_proxy(
             match router.connect_pool(pool_addr).await {
                 Ok(connection) => connection,
                 Err(_) => {
+                    warn!("Are you using the correct TOKEN??");
                     error!("No upstream available. Retrying...");
                     error!("Are you using the correct TOKEN??");
                     let mut secs = 10;

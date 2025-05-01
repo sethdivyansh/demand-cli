@@ -78,11 +78,26 @@ pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bo
 
 pub fn validate_share(
     request: &client_to_server::Submit<'static>,
-    job: &Notify,
+    recent_notifies: &VecDeque<Notify<'static>>,
     difficulty: f32,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<sv1_api::utils::HexU32Be>,
 ) -> bool {
+    let recent_notifies = recent_notifies.clone();
+    let matching_job = recent_notifies
+        .iter()
+        .find(|notify| notify.job_id == request.job_id);
+
+    let job = match matching_job {
+        Some(job) => job,
+        None => {
+            error!(
+                "Share rejected: Job ID {} not found in recent notifies",
+                request.job_id
+            );
+            return false;
+        }
+    };
     // Check job ID match
     if request.job_id != job.job_id {
         error!("Share rejected: Job ID mismatch");

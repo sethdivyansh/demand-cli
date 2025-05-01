@@ -10,7 +10,7 @@ use sv1_api::server_to_client;
 use sv1_api::utils::HexU32Be;
 use tokio::sync::broadcast;
 use tokio::task;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 fn apply_mask(mask: Option<HexU32Be>, message: &mut server_to_client::Notify<'static>) {
     if let Some(mask) = mask {
@@ -22,7 +22,7 @@ pub async fn start_notify(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
     mut rx_sv1_notify: broadcast::Receiver<server_to_client::Notify<'static>>,
-    last_notify: Option<server_to_client::Notify<'static>>,
+    recent_notifies: std::collections::VecDeque<server_to_client::Notify<'static>>,
     host: String,
     connection_id: u32,
 ) -> Result<(), Error<'static>> {
@@ -49,12 +49,12 @@ pub async fn start_notify(
                         break;
                     }
                 };
-                if is_a && !first_sent && last_notify.is_some() {
+                if is_a && !first_sent && !recent_notifies.is_empty() {
                     if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
                         error!("Failed to initailize difficulty managemant {e}")
                     };
 
-                    let mut sv1_mining_notify_msg = match last_notify.clone() {
+                    let mut sv1_mining_notify_msg = match recent_notifies.back().cloned() {
                         Some(sv1_mining_notify_msg) => sv1_mining_notify_msg,
                         None => {
                             error!("sv1_mining_notify_msg is None");
@@ -79,7 +79,7 @@ pub async fn start_notify(
                         break;
                     }
                     first_sent = true;
-                } else if is_a && last_notify.is_some() {
+                } else if is_a && !recent_notifies.is_empty() {
                     if let Err(e) =
                         start_update(task_manager, downstream.clone(), connection_id).await
                     {
@@ -89,7 +89,19 @@ pub async fn start_notify(
 
                     while let Ok(mut sv1_mining_notify_msg) = rx_sv1_notify.recv().await {
                         if downstream
-                            .safe_lock(|d| d.last_notify = Some(sv1_mining_notify_msg.clone()))
+                            .safe_lock(|d| {
+                                d.recent_notifies.push_back(sv1_mining_notify_msg.clone());
+                                debug!(
+                                    "Downstream {}: Added job_id {} to recent_notifies. Current jobs: {:?}", 
+                                    connection_id,
+                                    sv1_mining_notify_msg.job_id,
+                                    d.recent_notifies.iter().map(|n| &n.job_id).collect::<Vec<_>>()
+                                );
+                                if d.recent_notifies.len() > 2 {
+                                    if let Some(removed) = d.recent_notifies.pop_front() {
+                                        debug!("Downstream {}: Removed oldest job_id {}", connection_id, removed.job_id);
+                                    }
+                                }})
                             .is_err()
                         {
                             error!("Translator Downstream Mutex Poisoned");
@@ -150,17 +162,17 @@ async fn start_update(
 
             tokio::time::sleep(sleep_duration).await;
 
-            let ln = match downstream.safe_lock(|d| d.last_notify.clone()) {
+            let recent_notifies = match downstream.safe_lock(|d| d.recent_notifies.clone()) {
                 Ok(ln) => ln,
                 Err(e) => {
                     error!("{e}");
                     return;
                 }
             };
-            assert!(ln.is_some());
+            assert!(!recent_notifies.is_empty());
             // if hashrate has changed, update difficulty management, and send new
             // mining.set_difficulty
-            if let Err(e) = Downstream::try_update_difficulty_settings(&downstream, ln).await {
+            if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
                 error!("{e}");
                 return;
             };

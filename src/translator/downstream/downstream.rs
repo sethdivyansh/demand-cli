@@ -104,7 +104,7 @@ pub struct Downstream {
     pub(super) difficulty_mgmt: DownstreamDifficultyConfig,
     pub(super) upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     pub last_call_to_update_hr: u128,
-    pub(super) last_notify: Option<server_to_client::Notify<'static>>,
+    pub(super) recent_notifies: VecDeque<server_to_client::Notify<'static>>,
     pub(super) stats_sender: StatsSender,
 }
 
@@ -167,6 +167,11 @@ impl Downstream {
             initial_difficulty,
         };
 
+        let mut recent_notifies = VecDeque::with_capacity(2);
+        if let Some(notify) = last_notify.clone() {
+            recent_notifies.push_back(notify);
+        }
+
         let downstream = Arc::new(Mutex::new(Downstream {
             connection_id,
             authorized_names: vec![],
@@ -180,7 +185,7 @@ impl Downstream {
             difficulty_mgmt,
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
-            last_notify: last_notify.clone(),
+            recent_notifies: recent_notifies.clone(),
             stats_sender,
         }));
 
@@ -213,7 +218,7 @@ impl Downstream {
             task_manager.clone(),
             downstream.clone(),
             rx_sv1_notify,
-            last_notify,
+            recent_notifies,
             host.clone(),
             connection_id,
         )
@@ -354,7 +359,7 @@ impl Downstream {
             difficulty_mgmt,
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
-            last_notify: None,
+            recent_notifies: VecDeque::with_capacity(2),
             stats_sender,
         }
     }
@@ -417,7 +422,10 @@ impl IsServer<'static> for Downstream {
     /// When miner find the job which meets requested difficulty, it can submit share to the server.
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
-        info!("Down: Handling mining.submit: {:?}", &request);
+        info!(
+            "Downstream {}: Handling mining.submit for job_id {}",
+            self.connection_id, request.job_id
+        );
 
         // check first job received
         if !self.first_job_received {
@@ -427,7 +435,7 @@ impl IsServer<'static> for Downstream {
         //check allowed to send shares
         match allow_submit_share() {
             Ok(true) => {
-                let Some(job) = &self.last_notify else {
+                if self.recent_notifies.is_empty() {
                     error!("Share rejected: No last job found");
                     self.stats_sender.update_rejected_shares(self.connection_id);
                     return false;
@@ -436,7 +444,7 @@ impl IsServer<'static> for Downstream {
                                                                                   //check share is valid
                 if validate_share(
                     request,
-                    job,
+                    &self.recent_notifies,
                     self.difficulty_mgmt.current_difficulty,
                     self.extranonce1.clone(),
                     self.version_rolling_mask.clone(),
