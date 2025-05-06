@@ -11,6 +11,7 @@ use binary_sv2::Sv2DataType;
 use bitcoin::{
     block::{Header, Version},
     hashes::{sha256d, Hash as BHash},
+    hex::DisplayHex,
     BlockHash, CompactTarget,
 };
 use lazy_static::lazy_static;
@@ -91,10 +92,7 @@ pub fn validate_share(
     let job = match matching_job {
         Some(job) => job,
         None => {
-            error!(
-                "Share rejected: Job ID {} not found in recent notifies",
-                request.job_id
-            );
+            error!("Share rejected: Invalid Job ID {}", request.job_id);
             return false;
         }
     };
@@ -138,9 +136,9 @@ pub fn validate_share(
     );
 
     hash.reverse(); //convert to little-endian
-    println!("Hash: {:?}", hex::encode(hash));
+    println!("Hash: {:?}", hash.to_vec().as_hex());
     let target = Downstream::difficulty_to_target(difficulty);
-    println!("Target: {:?}", hex::encode(target));
+    println!("Target: {:?}", target.to_vec().as_hex());
     hash <= target
 }
 
