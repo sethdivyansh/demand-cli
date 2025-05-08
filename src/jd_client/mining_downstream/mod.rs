@@ -613,10 +613,11 @@ impl
                             header_nonce: share.nonce,
                             coinbase_tx: coinbase.try_into()?,
                         };
-                        // The below channel should never be full is ok to block
-                        solution_sender
-                            .blocking_send(solution)
-                            .map_err(|_| Error::DownstreamDown)?; // Better Error to return here?
+                        tokio::spawn(async move {
+                            if solution_sender.send(solution).await.is_err() {
+                                error!("Downstream channel closed, couldn't send solution");
+                            }
+                        });
                         if !self.status.is_solo_miner() {
                             {
                                 let jd = self.jd.clone();

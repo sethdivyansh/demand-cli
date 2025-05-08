@@ -17,7 +17,7 @@ use bitcoin::{
 use lazy_static::lazy_static;
 use roles_logic_sv2::utils::Mutex;
 use sv1_api::{client_to_server, server_to_client::Notify};
-use tracing::error;
+use tracing::{debug, error};
 
 use super::downstream::Downstream;
 lazy_static! {
@@ -30,8 +30,11 @@ lazy_static! {
 
 /// Checks if a share can be sent upstream based on a rate limit of 70 shares per minute.
 /// Returns `true` if the share can be sent, `false` if the limit is exceeded.
-pub async fn check_share_rate_limit() {
+pub async fn check_share_rate_limit(downstream: Arc<Mutex<Downstream>>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut last_update = tokio::time::Instant::now(); // Track last difficulty update
+    let mut rate_limit_hit_count = 0;
+
     loop {
         interval.tick().await;
         let now = tokio::time::Instant::now();
@@ -52,7 +55,24 @@ pub async fn check_share_rate_limit() {
                 0
             });
 
-        IS_RATE_LIMITED.store(count >= 70, std::sync::atomic::Ordering::SeqCst);
+        let is_limited = count >= 70;
+        IS_RATE_LIMITED.store(is_limited, std::sync::atomic::Ordering::SeqCst);
+
+        if is_limited {
+            rate_limit_hit_count += 1;
+        } else {
+            rate_limit_hit_count = 0;
+        }
+
+        if rate_limit_hit_count >= 5 && now.duration_since(last_update).as_secs() >= 2 {
+            debug!("Rate limited. Updating difficulty");
+            if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
+                error!("Failed to update difficulty: {e}");
+            }
+            last_update = now;
+            IS_RATE_LIMITED.store(false, std::sync::atomic::Ordering::SeqCst);
+            rate_limit_hit_count = 0;
+        }
     }
 }
 
@@ -92,7 +112,10 @@ pub fn validate_share(
     let job = match matching_job {
         Some(job) => job,
         None => {
-            error!("Share rejected: Invalid Job ID {}", request.job_id);
+            error!(
+                "Share rejected: Job ID {} not found in recent notify msgs",
+                request.job_id
+            );
             return false;
         }
     };

@@ -47,7 +47,8 @@ impl Downstream {
         });
         stats_sender.update_diff(connection_id, diff);
         stats_sender.update_hashrate(connection_id, estimated_hashrate);
-        tokio::spawn(crate::translator::utils::check_share_rate_limit());
+        let downstream = self_.clone();
+        tokio::spawn(crate::translator::utils::check_share_rate_limit(downstream));
 
         Ok(())
     }
