@@ -155,7 +155,8 @@ async fn start_update(
             let sleep_duration = if share_count >= crate::SHARE_PER_MIN * 3.0
                 || share_count <= crate::SHARE_PER_MIN / 3.0
             {
-                std::time::Duration::from_millis(5000)
+                // TODO: this should only apply when after the first share has been received
+                std::time::Duration::from_millis(crate::ARGS.adjustment_interval)
             } else {
                 std::time::Duration::from_millis(crate::ARGS.adjustment_interval)
             };

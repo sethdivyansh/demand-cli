@@ -34,8 +34,7 @@ const CHANNEL_DIFF_UPDTATE_INTERVAL: u32 = 10;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
 const MAIN_POOL_ADDRESS: &str = "mining.dmnd.work:2000";
 //const TEST_POOL_ADDRESS: &str = "127.0.0.1:20000";
-const TEST_POOL_ADDRESS: &str =
-    "k8s-default-pool-de2d9b37ea-6bc40843aed871f2.elb.eu-central-1.amazonaws.com:2000";
+const TEST_POOL_ADDRESS: &str = "18.193.252.132:2000";
 const MAIN_AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
 const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 //const TP_ADDRESS: &str = "127.0.0.1:8442";
