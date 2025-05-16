@@ -8,9 +8,12 @@ use roles_logic_sv2::{
     parsers::Mining,
     utils::{GroupId, Mutex},
 };
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
 };
 use sv1_api::{client_to_server::Submit, server_to_client, utils::HexU32Be};
 use tokio::sync::broadcast;
@@ -61,7 +64,7 @@ pub struct Bridge {
     future_jobs: Vec<NewExtendedMiningJob<'static>>,
     last_p_hash: Option<SetNewPrevHash<'static>>,
     target: Arc<Mutex<Vec<u8>>>,
-    last_job_id: u32,
+    valid_job_ids: VecDeque<u32>,
 }
 
 impl Bridge {
@@ -106,7 +109,7 @@ impl Bridge {
             future_jobs: vec![],
             last_p_hash: None,
             target,
-            last_job_id: 0,
+            valid_job_ids: VecDeque::with_capacity(2), // Initialize with capacity for 2 jobs
         })))
     }
 
@@ -260,20 +263,22 @@ impl Bridge {
         let mut upstream_target: Target = upstream_target.into();
         let res = self_
             .safe_lock(|s| {
+                let job_id = share.share.job_id.parse::<u32>().expect("Invalid job_id");
+                if !s.valid_job_ids.contains(&job_id) {
+                    info!("Share rejected: job_id {} not in last two jobs", job_id);
+                    return Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob); // rejected
+                }
                 s.channel_factory.set_target(&mut upstream_target);
-                 match s.translate_submit(
-                    share.channel_id,
-                    share.share,
-                    share.version_rolling_mask,
-                ) {
+                match s.translate_submit(share.channel_id, share.share, share.version_rolling_mask)
+                {
                     Ok(submit_shares_extended) => {
-                        // Ordering::Relaxed is safe here because we only need simple counter updates. 
+                        // Ordering::Relaxed is safe here because we only need simple counter updates.
                         // No need for strict ordering since it just tracks failures.
                         SUBMIT_FAIL_COUNTER.store(0, Ordering::Relaxed); // Reset on success
-                        s.channel_factory.on_submit_shares_extended(submit_shares_extended)
-                   },
-                    Err(e) => {
-                        error!("Failed to Translates SV1 mining.submit message to SV2 SubmitSharesExtended message: {e}");
+                        s.channel_factory
+                            .on_submit_shares_extended(submit_shares_extended)
+                    }
+                    Err(_) => {
                         Err(roles_logic_sv2::Error::NoValidJob) // Error will be handled by the caller
                     }
                 }
@@ -417,7 +422,7 @@ impl Bridge {
                 self_
                     .safe_lock(|s| {
                         s.last_notify = Some(notify);
-                        s.last_job_id = j_id;
+                        s.valid_job_ids.push_back(j_id);
                     })
                     .map_err(|_| Error::BridgeMutexPoisoned)?;
                 break;
@@ -529,7 +534,10 @@ impl Bridge {
             self_
                 .safe_lock(|s| {
                     s.last_notify = Some(notify);
-                    s.last_job_id = j_id;
+                    s.valid_job_ids.push_back(j_id);
+                    if s.valid_job_ids.len() > 2 {
+                        s.valid_job_ids.pop_front(); // Remove oldest if more than 2
+                    }
                 })
                 .map_err(|_| Error::BridgeMutexPoisoned)?;
             Ok(())

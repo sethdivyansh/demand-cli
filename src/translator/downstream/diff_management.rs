@@ -1,7 +1,7 @@
 use super::{Downstream, DownstreamMessages, SetDownstreamTarget};
 use pid::Pid;
 use roles_logic_sv2::{self, utils::from_u128_to_u256};
-use sv1_api::{self, methods::server_to_client::SetDifficulty, server_to_client::Notify};
+use sv1_api::{self, methods::server_to_client::SetDifficulty};
 
 use super::super::error::{Error, ProxyResult};
 use primitive_types::U256;
@@ -47,7 +47,8 @@ impl Downstream {
         });
         stats_sender.update_diff(connection_id, diff);
         stats_sender.update_hashrate(connection_id, estimated_hashrate);
-        tokio::spawn(crate::translator::utils::check_share_rate_limit());
+        let downstream = self_.clone();
+        tokio::spawn(crate::translator::utils::check_share_rate_limit(downstream));
 
         Ok(())
     }
@@ -79,7 +80,6 @@ impl Downstream {
     /// downstream and the bridge.
     pub async fn try_update_difficulty_settings(
         self_: &Arc<Mutex<Self>>,
-        last_notify: Option<Notify<'static>>,
     ) -> ProxyResult<'static, ()> {
         let channel_id = self_
             .clone()
@@ -87,7 +87,7 @@ impl Downstream {
             .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
         if let Some(new_diff) = Self::update_difficulty_and_hashrate(self_)? {
-            Self::update_diff_setting(self_, channel_id, new_diff.into(), last_notify).await?;
+            Self::update_diff_setting(self_, channel_id, new_diff.into()).await?;
         }
         Ok(())
     }
@@ -100,13 +100,17 @@ impl Downstream {
         self_: &Arc<Mutex<Self>>,
         channel_id: u32,
         new_diff: f64,
-        last_notify: Option<Notify<'static>>,
     ) -> ProxyResult<'static, ()> {
         // Send messages downstream
         let (message, target) = diff_to_sv1_message(new_diff)?;
         Downstream::send_message_downstream(self_.clone(), message).await;
 
-        if let Some(notify) = last_notify {
+        // Get the last notify
+        let recent_notify = self_
+            .safe_lock(|d| d.recent_notifies.back().cloned())
+            .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)?;
+
+        if let Some(notify) = recent_notify {
             Downstream::send_message_downstream(self_.clone(), notify.into()).await;
         }
 
@@ -459,7 +463,7 @@ mod test {
         while elapsed <= total_run_time {
             mock_mine(initial_target.clone().into(), &mut share);
             Downstream::save_share(downstream.clone()).unwrap();
-            let _ = Downstream::try_update_difficulty_settings(&downstream, None).await;
+            let _ = Downstream::try_update_difficulty_settings(&downstream).await;
             initial_target = downstream
                 .safe_lock(|d| {
                     match roles_logic_sv2::utils::hash_rate_to_target(

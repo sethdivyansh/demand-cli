@@ -403,7 +403,6 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
 
         let extranonces = ExtendedExtranonce::new(range_0, range_1, range_2);
         let creator = roles_logic_sv2::job_creator::JobsCreators::new(total_len as u8);
-        let share_per_min = 1.0;
         let channel_kind =
             roles_logic_sv2::channel_logic::channel_factory::ExtendedChannelKind::ProxyJd {
                 upstream_target: m.target.clone().into(),
@@ -412,7 +411,7 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             ids,
             extranonces,
             creator,
-            share_per_min,
+            crate::SHARE_PER_MIN,
             channel_kind,
             vec![],
             vec![],
