@@ -17,7 +17,7 @@ use bitcoin::{
 use lazy_static::lazy_static;
 use roles_logic_sv2::utils::Mutex;
 use sv1_api::{client_to_server, server_to_client::Notify};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use super::downstream::Downstream;
 lazy_static! {
@@ -159,9 +159,9 @@ pub fn validate_share(
     );
 
     hash.reverse(); //convert to little-endian
-    debug!("Hash: {:?}", hash.to_vec().as_hex());
+    info!("Hash: {:?}", hash.to_vec().as_hex());
     let target = Downstream::difficulty_to_target(difficulty);
-    debug!("Target: {:?}", target.to_vec().as_hex());
+    info!("Target: {:?}", target.to_vec().as_hex());
     hash <= target
 }
 
