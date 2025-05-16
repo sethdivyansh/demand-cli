@@ -347,23 +347,6 @@ impl Upstream {
         };
         Ok((diff_manager_handle.into(), main_loop_handle.into()))
     }
-    // #[allow(clippy::result_large_err)]
-    // fn get_job_id(self_: &Arc<Mutex<Self>>) -> Result<u32, super::super::error::Error<'static>> {
-    //     self_
-    //         .safe_lock(|s| {
-    //             if s.is_work_selection_enabled() {
-    //                 s.last_job_id
-    //                     .ok_or(super::super::error::Error::RolesSv2Logic(
-    //                         RolesLogicError::NoValidTranslatorJob,
-    //                     ))
-    //             } else {
-    //                 s.job_id.ok_or(super::super::error::Error::RolesSv2Logic(
-    //                     RolesLogicError::NoValidJob,
-    //                 ))
-    //             }
-    //         })
-    //         .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?
-    // }
 
     fn handle_submit(
         self_: Arc<Mutex<Self>>,
@@ -401,15 +384,6 @@ impl Upstream {
                     };
 
                     sv2_submit.channel_id = channel_id;
-
-                    // let job_id = match Self::get_job_id(&self_) {
-                    //     Ok(job_id) => job_id,
-                    //     Err(e) => {
-                    //         error!("{e}");
-                    //         return;
-                    //     }
-                    // };
-                    // sv2_submit.job_id = job_id;
 
                     let message =
                         roles_logic_sv2::parsers::Mining::SubmitSharesExtended(sv2_submit);

@@ -159,9 +159,9 @@ pub fn validate_share(
     );
 
     hash.reverse(); //convert to little-endian
-    println!("Hash: {:?}", hash.to_vec().as_hex());
+    debug!("Hash: {:?}", hash.to_vec().as_hex());
     let target = Downstream::difficulty_to_target(difficulty);
-    println!("Target: {:?}", target.to_vec().as_hex());
+    debug!("Target: {:?}", target.to_vec().as_hex());
     hash <= target
 }
 

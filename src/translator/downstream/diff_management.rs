@@ -80,7 +80,6 @@ impl Downstream {
     /// downstream and the bridge.
     pub async fn try_update_difficulty_settings(
         self_: &Arc<Mutex<Self>>,
-        // last_notify: Option<Notify<'static>>,
     ) -> ProxyResult<'static, ()> {
         let channel_id = self_
             .clone()
@@ -101,7 +100,6 @@ impl Downstream {
         self_: &Arc<Mutex<Self>>,
         channel_id: u32,
         new_diff: f64,
-        // last_notify: Option<Notify<'static>>,
     ) -> ProxyResult<'static, ()> {
         // Send messages downstream
         let (message, target) = diff_to_sv1_message(new_diff)?;
