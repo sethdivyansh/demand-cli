@@ -7,7 +7,7 @@ use std::{
 };
 use tracing::{error, info, warn};
 
-use crate::{HashUnit, EXPECTED_SV1_HASHPOWER};
+use crate::{HashUnit, DEFAULT_SV1_HASHPOWER};
 lazy_static! {
     pub static ref CONFIG: Configuration = Configuration::load_config();
 }
@@ -57,7 +57,7 @@ pub struct Configuration {
     pool_addresses: Option<Vec<SocketAddr>>,
     interval: u64,
     delay: u64,
-    downstream_hashrate: Option<f32>,
+    downstream_hashrate: f32,
     loglevel: String,
     nc_loglevel: String,
     test: bool,
@@ -84,7 +84,7 @@ impl Configuration {
         CONFIG.delay
     }
 
-    pub fn downstream_hashrate() -> Option<f32> {
+    pub fn downstream_hashrate() -> f32 {
         CONFIG.downstream_hashrate
     }
 
@@ -94,9 +94,9 @@ impl Configuration {
 
     pub fn loglevel() -> &'static str {
         match CONFIG.loglevel.to_lowercase().as_str() {
-            "trace" | "debug" | "info" | "warn" | "error" => &CONFIG.loglevel,
+            "trace" | "debug" | "info" | "warn" | "error" | "off" => &CONFIG.loglevel,
             _ => {
-                error!(
+                eprintln!(
                     "Invalid log level '{}'. Defaulting to 'info'.",
                     CONFIG.loglevel
                 );
@@ -107,9 +107,9 @@ impl Configuration {
 
     pub fn nc_loglevel() -> &'static str {
         match CONFIG.nc_loglevel.as_str() {
-            "trace" | "debug" | "info" | "warn" | "error" => &CONFIG.nc_loglevel,
+            "trace" | "debug" | "info" | "warn" | "error" | "off" => &CONFIG.nc_loglevel,
             _ => {
-                error!(
+                eprintln!(
                     "Invalid log level for noise_connection '{}' Defaulting to 'off'.",
                     &CONFIG.nc_loglevel
                 );
@@ -188,7 +188,7 @@ impl Configuration {
             .or_else(|| std::env::var("DELAY").ok().and_then(|s| s.parse().ok()))
             .unwrap_or(0);
 
-        let downstream_hashrate = args
+        let expected_hashrate = args
             .downstream_hashrate
             .or_else(|| {
                 config
@@ -201,17 +201,18 @@ impl Configuration {
                     .ok()
                     .and_then(|s| s.parse().ok())
             });
-        let hashpower = *EXPECTED_SV1_HASHPOWER;
-
-        if downstream_hashrate.is_some() {
+        let downstream_hashrate;
+        if let Some(hashpower) = expected_hashrate {
+            downstream_hashrate = hashpower;
             info!(
                 "Using downstream hashrate: {}h/s",
                 HashUnit::format_value(hashpower)
             );
         } else {
+            downstream_hashrate = DEFAULT_SV1_HASHPOWER;
             warn!(
                 "No downstream hashrate provided, using default value: {}h/s",
-                HashUnit::format_value(hashpower)
+                HashUnit::format_value(DEFAULT_SV1_HASHPOWER)
             );
         }
 

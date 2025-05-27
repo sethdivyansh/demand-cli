@@ -43,8 +43,7 @@ lazy_static! {
         Configuration::downstream_listening_addr().unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
-    static ref EXPECTED_SV1_HASHPOWER: f32 =
-        Configuration::downstream_hashrate().unwrap_or(DEFAULT_SV1_HASHPOWER);
+    static ref EXPECTED_SV1_HASHPOWER: f32 = Configuration::downstream_hashrate();
 }
 
 lazy_static! {
