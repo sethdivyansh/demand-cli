@@ -46,16 +46,13 @@ lazy_static! {
         Configuration::downstream_listening_addr().unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
+    static ref POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
+        roles_logic_sv2::utils::Mutex::new(None);
     static ref EXPECTED_SV1_HASHPOWER: f32 = Configuration::downstream_hashrate();
     static ref API_SERVER_PORT: String = Configuration::api_server_port();
 }
 
 lazy_static! {
-    pub static ref TEST_POOL_ADDRESS: SocketAddr = "18.193.252.132:2000"
-        .to_socket_addrs()
-        .expect("Invalid pool address")
-        .next()
-        .expect("Invalid pool address");
     pub static ref AUTH_PUB_KEY: &'static str = if Configuration::test() {
         TEST_AUTH_PUB_KEY
     } else {
@@ -91,7 +88,13 @@ async fn main() {
         Some(addr) => addr,
         None => {
             if Configuration::test() {
-                vec![*TEST_POOL_ADDRESS] // Default address in test mode
+                let test_address = "18.193.252.132:2000"
+                    .to_socket_addrs()
+                    .expect("Invalid pool address")
+                    .next()
+                    .expect("Invalid pool address");
+
+                vec![test_address] // Default address in test mode
             } else {
                 panic!("Pool address is missing"); // Will be replaced by solo mining later
             }
@@ -114,6 +117,15 @@ async fn initialize_proxy(
     loop {
         // Initial setup for the proxy
         let stats_sender = api::stats::StatsSender::new();
+
+        POOL_ADDRESS
+            .safe_lock(|pool_address| {
+                *pool_address = pool_addr;
+            })
+            .unwrap_or_else(|_| {
+                error!("Pool address Mutex corrupt");
+                ProxyState::update_inconsistency(Some(1));
+            });
 
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
