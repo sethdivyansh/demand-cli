@@ -35,6 +35,8 @@ struct Args {
     listening_addr: Option<String>,
     #[clap(long = "config", short = 'c')]
     config_file: Option<PathBuf>,
+    #[clap(long = "api_server_port", short = 's')]
+    api_server_port: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +51,7 @@ struct ConfigFile {
     nc_loglevel: Option<String>,
     test: Option<bool>,
     listening_addr: Option<String>,
+    api_server_port: Option<String>,
 }
 
 pub struct Configuration {
@@ -62,6 +65,7 @@ pub struct Configuration {
     nc_loglevel: String,
     test: bool,
     listening_addr: Option<String>,
+    api_server_port: String,
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -90,6 +94,9 @@ impl Configuration {
 
     pub fn downstream_listening_addr() -> Option<String> {
         CONFIG.listening_addr.clone()
+    }
+    pub fn api_server_port() -> String {
+        CONFIG.api_server_port.clone()
     }
 
     pub fn loglevel() -> &'static str {
@@ -140,6 +147,7 @@ impl Configuration {
                 nc_loglevel: None,
                 test: None,
                 listening_addr: None,
+                api_server_port: None,
             });
 
         let token = args
@@ -221,6 +229,15 @@ impl Configuration {
                 .ok()
                 .and_then(|s| s.parse().ok())
         });
+        let api_server_port = args
+            .api_server_port
+            .or(config.api_server_port)
+            .or_else(|| {
+                std::env::var("API_SERVER_PORT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or("3001".to_string());
 
         let loglevel = args
             .loglevel
@@ -247,6 +264,7 @@ impl Configuration {
             nc_loglevel,
             test,
             listening_addr,
+            api_server_port,
         }
     }
 }

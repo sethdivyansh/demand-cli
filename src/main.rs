@@ -44,6 +44,7 @@ lazy_static! {
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
     static ref EXPECTED_SV1_HASHPOWER: f32 = Configuration::downstream_hashrate();
+    static ref API_SERVER_PORT: String = Configuration::api_server_port();
 }
 
 lazy_static! {
