@@ -291,7 +291,7 @@ impl Downstream {
             }
             Err(e) => {
                 error!("{e}");
-                Err(Error::V1Protocol(e))
+                Err(Error::V1Protocol(Box::new(e)))
             }
         }
     }
