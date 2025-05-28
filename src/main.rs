@@ -11,7 +11,10 @@ use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use std::time::Duration;
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    time::Duration,
+};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
 mod api;
@@ -48,7 +51,11 @@ lazy_static! {
 }
 
 lazy_static! {
-    // pub static ref POOL_ADDRESS: &'static str = Configuration::pool_address();
+    pub static ref TEST_POOL_ADDRESS: SocketAddr = "18.193.252.132:2000"
+        .to_socket_addrs()
+        .expect("Invalid pool address")
+        .next()
+        .expect("Invalid pool address");
     pub static ref AUTH_PUB_KEY: &'static str = if Configuration::test() {
         TEST_AUTH_PUB_KEY
     } else {
@@ -80,19 +87,23 @@ async fn main() {
 
     let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
 
-    match Configuration::pool_address() {
-        Some(pool_addresses) => {
-            let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
-            let epsilon = Duration::from_millis(10);
-            let best_upstream = router.select_pool_connect().await;
-            initialize_proxy(&mut router, best_upstream, epsilon).await;
-            info!("exiting");
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        }
+    let pool_addresses = match Configuration::pool_address() {
+        Some(addr) => addr,
         None => {
-            panic!("Pool address is missing") // Panic for now, later we start solo mining here
+            if Configuration::test() {
+                vec![*TEST_POOL_ADDRESS] // Default address in test mode
+            } else {
+                panic!("Pool address is missing"); // Will be replaced by solo mining later
+            }
         }
     };
+
+    let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
+    let epsilon = Duration::from_millis(10);
+    let best_upstream = router.select_pool_connect().await;
+    initialize_proxy(&mut router, best_upstream, epsilon).await;
+    info!("exiting");
+    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 }
 
 async fn initialize_proxy(
