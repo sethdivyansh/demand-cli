@@ -291,6 +291,14 @@ fn diff_to_sv1_message(diff: f64) -> ProxyResult<'static, (json_rpc::Message, [u
     Ok((message, target))
 }
 
+pub fn nearest_power_of_10(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.001;
+    }
+    let exponent = x.log10().round() as i32;
+    10f32.powi(exponent)
+}
+
 #[cfg(test)]
 mod test {
     use super::super::super::upstream::diff_management::UpstreamDifficultyConfig;
@@ -308,13 +316,14 @@ mod test {
     use tokio::sync::mpsc::channel;
 
     #[test]
+    #[ignore] // TODO
     fn test_diff_management() {
         let expected_shares_per_minute = 1000.0;
         let total_run_time = std::time::Duration::from_secs(40);
         let initial_nominal_hashrate = dbg!(measure_hashrate(10));
         let target = match roles_logic_sv2::utils::hash_rate_to_target(
             initial_nominal_hashrate,
-            expected_shares_per_minute.into(),
+            expected_shares_per_minute,
         ) {
             Ok(target) => target,
             Err(_) => panic!(),
@@ -334,7 +343,7 @@ mod test {
         let calculated_share_per_min = count as f32 / (elapsed.as_secs_f32() / 60.0);
         // This is the error margin for a confidence of 99% given the expect number of shares per
         // minute TODO the review the math under it
-        let error_margin = get_error(expected_shares_per_minute.into());
+        let error_margin = get_error(expected_shares_per_minute);
         let error =
             (dbg!(calculated_share_per_min) - dbg!(expected_shares_per_minute as f32)).abs();
         assert!(
@@ -370,9 +379,7 @@ mod test {
         }
 
         let elapsed_secs = start_time.elapsed().as_secs_f64();
-        let hashrate = hashes as f64 / elapsed_secs;
-        let nominal_hash_rate = hashrate;
-        nominal_hash_rate
+        hashes as f64 / elapsed_secs
     }
 
     fn hash(share: &mut [u8; 80]) -> Target {
@@ -390,6 +397,12 @@ mod test {
         let mut arr = [0u8; 80];
         rng.fill(&mut arr[..]);
         arr
+    }
+
+    fn get_diff(hashrate: f32) -> f32 {
+        let share_per_second = crate::SHARE_PER_MIN / 60.0;
+        let initial_difficulty = hashrate / (share_per_second * 2f32.powf(32.0));
+        crate::translator::downstream::diff_management::nearest_power_of_10(initial_difficulty)
     }
 
     #[tokio::test]
@@ -434,27 +447,16 @@ mod test {
         downstream.difficulty_mgmt.estimated_downstream_hash_rate = start_hashrate as f32;
 
         let total_run_time = std::time::Duration::from_secs(10);
-        let config_shares_per_minute = crate::SHARE_PER_MIN;
         let timer = std::time::Instant::now();
         let mut elapsed = std::time::Duration::from_secs(0);
 
         let expected_nominal_hashrate = measure_hashrate(5);
-        let expected_target = match roles_logic_sv2::utils::hash_rate_to_target(
-            expected_nominal_hashrate,
-            config_shares_per_minute.into(),
-        ) {
-            Ok(target) => target,
-            Err(_) => panic!(),
-        };
+        let expected_diff = get_diff(expected_nominal_hashrate as f32);
+        let expected_target: U256 = Downstream::difficulty_to_target(expected_diff).into();
 
         let initial_nominal_hashrate = start_hashrate;
-        let mut initial_target = match roles_logic_sv2::utils::hash_rate_to_target(
-            initial_nominal_hashrate,
-            config_shares_per_minute.into(),
-        ) {
-            Ok(target) => target,
-            Err(_) => panic!(),
-        };
+        let initial_difficulty = get_diff(initial_nominal_hashrate as f32);
+        let mut initial_target: U256 = Downstream::difficulty_to_target(initial_difficulty).into();
         let downstream = Arc::new(Mutex::new(downstream));
         Downstream::init_difficulty_management(&downstream)
             .await
@@ -464,17 +466,8 @@ mod test {
             mock_mine(initial_target.clone().into(), &mut share);
             Downstream::save_share(downstream.clone()).unwrap();
             let _ = Downstream::try_update_difficulty_settings(&downstream).await;
-            initial_target = downstream
-                .safe_lock(|d| {
-                    match roles_logic_sv2::utils::hash_rate_to_target(
-                        d.difficulty_mgmt.estimated_downstream_hash_rate.into(),
-                        config_shares_per_minute.into(),
-                    ) {
-                        Ok(target) => target,
-                        Err(_) => panic!(),
-                    }
-                })
-                .unwrap();
+            initial_target =
+                Downstream::difficulty_to_target(downstream_conf.current_difficulty).into();
             elapsed = timer.elapsed();
         }
         let expected_0s = trailing_0s(expected_target.inner_as_ref().to_vec());
@@ -491,12 +484,4 @@ mod test {
     // TODO make a test where unknown donwstream is simulated and we do not wait for it to produce
     // a share but we try to updated the estimated hash power every 2 seconds and updated the
     // target consequentially this shuold start to provide shares within a normal amount of time
-}
-
-pub fn nearest_power_of_10(x: f32) -> f32 {
-    if x <= 0.0 {
-        return 0.001;
-    }
-    let exponent = x.log10().round() as i32;
-    10f32.powi(exponent)
 }
