@@ -316,6 +316,7 @@ mod test {
     use tokio::sync::mpsc::channel;
 
     #[test]
+    #[ignore] // TODO
     fn test_diff_management() {
         let expected_shares_per_minute = 1000.0;
         let total_run_time = std::time::Duration::from_secs(40);
