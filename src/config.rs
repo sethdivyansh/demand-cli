@@ -27,6 +27,8 @@ struct Args {
     adjustment_interval: Option<u64>,
     #[clap(long = "pool", short = 'p', value_delimiter = ',')]
     pool_addresses: Option<Vec<String>>,
+    #[clap(long = "test-pool", value_delimiter = ',')]
+    test_pool_addresses: Option<Vec<String>>,
     #[clap(long)]
     token: Option<String>,
     #[clap(long)]
@@ -35,7 +37,7 @@ struct Args {
     listening_addr: Option<String>,
     #[clap(long = "config", short = 'c')]
     config_file: Option<PathBuf>,
-    #[clap(long = "api_server_port", short = 's')]
+    #[clap(long = "api-server-port", short = 's')]
     api_server_port: Option<String>,
 }
 
@@ -44,6 +46,7 @@ struct ConfigFile {
     token: Option<String>,
     tp_address: Option<String>,
     pool_addresses: Option<Vec<String>>,
+    test_pool_addresses: Option<Vec<String>>,
     interval: Option<u64>,
     delay: Option<u64>,
     downstream_hashrate: Option<String>,
@@ -58,6 +61,7 @@ pub struct Configuration {
     token: Option<String>,
     tp_address: Option<String>,
     pool_addresses: Option<Vec<SocketAddr>>,
+    test_pool_addresses: Option<Vec<SocketAddr>>,
     interval: u64,
     delay: u64,
     downstream_hashrate: f32,
@@ -77,7 +81,11 @@ impl Configuration {
     }
 
     pub fn pool_address() -> Option<Vec<SocketAddr>> {
-        CONFIG.pool_addresses.clone()
+        if CONFIG.test {
+            CONFIG.test_pool_addresses.clone() // Return test pool addresses in test mode
+        } else {
+            CONFIG.pool_addresses.clone()
+        }
     }
 
     pub fn adjustment_interval() -> u64 {
@@ -140,6 +148,7 @@ impl Configuration {
                 token: None,
                 tp_address: None,
                 pool_addresses: None,
+                test_pool_addresses: None,
                 interval: None,
                 delay: None,
                 downstream_hashrate: None,
@@ -178,6 +187,30 @@ impl Configuration {
             })
             .or_else(|| {
                 std::env::var("POOL_ADDRESSES").ok().map(|s| {
+                    s.split(',')
+                        .map(|s| parse_address(s.trim().to_string()))
+                        .collect::<Vec<SocketAddr>>()
+                })
+            });
+
+        let test_pool_addresses: Option<Vec<SocketAddr>> = args
+            .test_pool_addresses
+            .map(|addresses| {
+                addresses
+                    .into_iter()
+                    .map(parse_address)
+                    .collect::<Vec<SocketAddr>>()
+            })
+            .or_else(|| {
+                config.test_pool_addresses.map(|addresses| {
+                    addresses
+                        .into_iter()
+                        .map(parse_address)
+                        .collect::<Vec<SocketAddr>>()
+                })
+            })
+            .or_else(|| {
+                std::env::var("TEST_POOL_ADDRESSES").ok().map(|s| {
                     s.split(',')
                         .map(|s| parse_address(s.trim().to_string()))
                         .collect::<Vec<SocketAddr>>()
@@ -257,6 +290,7 @@ impl Configuration {
             token,
             tp_address,
             pool_addresses,
+            test_pool_addresses,
             interval,
             delay,
             downstream_hashrate,

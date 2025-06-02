@@ -11,10 +11,7 @@ use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use std::{
-    net::{SocketAddr, ToSocketAddrs},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
 mod api;
@@ -47,7 +44,7 @@ lazy_static! {
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
     static ref POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
-        roles_logic_sv2::utils::Mutex::new(None);
+        roles_logic_sv2::utils::Mutex::new(None); // Connected pool address
     static ref EXPECTED_SV1_HASHPOWER: f32 = Configuration::downstream_hashrate();
     static ref API_SERVER_PORT: String = Configuration::api_server_port();
 }
@@ -84,22 +81,15 @@ async fn main() {
 
     let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
 
-    let pool_addresses = match Configuration::pool_address() {
-        Some(addr) => addr,
-        None => {
+    let pool_addresses = Configuration::pool_address()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
             if Configuration::test() {
-                let test_address = "18.193.252.132:2000"
-                    .to_socket_addrs()
-                    .expect("Invalid pool address")
-                    .next()
-                    .expect("Invalid pool address");
-
-                vec![test_address] // Default address in test mode
+                panic!("Test pool address is missing");
             } else {
-                panic!("Pool address is missing"); // Will be replaced by solo mining later
+                panic!("Pool address is missing");
             }
-        }
-    };
+        });
 
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
     let epsilon = Duration::from_millis(10);
@@ -117,15 +107,6 @@ async fn initialize_proxy(
     loop {
         // Initial setup for the proxy
         let stats_sender = api::stats::StatsSender::new();
-
-        POOL_ADDRESS
-            .safe_lock(|pool_address| {
-                *pool_address = pool_addr;
-            })
-            .unwrap_or_else(|_| {
-                error!("Pool address Mutex corrupt");
-                ProxyState::update_inconsistency(Some(1));
-            });
 
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
