@@ -157,6 +157,16 @@ impl Router {
         .await
         {
             Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
+                crate::POOL_ADDRESS
+                    .safe_lock(|pool_address| {
+                        *pool_address = Some(pool);
+                        println!("Pool: {:?}", pool_address)
+                    })
+                    .unwrap_or_else(|_| {
+                        error!("Pool address Mutex corrupt");
+                        crate::proxy_state::ProxyState::update_inconsistency(Some(1));
+                    });
+
                 Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
             }
 
