@@ -104,7 +104,8 @@ impl Router {
                         return None;
                     }
                 };
-                if best_pool_latency < (current_latency - epsilon) {
+                // saturating_sub is used to avoid panic on negative duration result
+                if best_pool_latency < current_latency.saturating_sub(epsilon) {
                     info!(
                         "Found faster pool: {:?} with latency {:?}",
                         best_pool, best_pool_latency
@@ -160,7 +161,6 @@ impl Router {
                 crate::POOL_ADDRESS
                     .safe_lock(|pool_address| {
                         *pool_address = Some(pool);
-                        println!("Pool: {:?}", pool_address)
                     })
                     .unwrap_or_else(|_| {
                         error!("Pool address Mutex corrupt");
