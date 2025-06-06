@@ -92,7 +92,7 @@ async fn main() {
         });
 
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
-    let epsilon = Duration::from_millis(10);
+    let epsilon = Duration::from_millis(30_000);
     let best_upstream = router.select_pool_connect().await;
     initialize_proxy(&mut router, best_upstream, epsilon).await;
     info!("exiting");
