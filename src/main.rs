@@ -38,6 +38,9 @@ const MAX_LEN_DOWN_MSG: u32 = 10000;
 const MAIN_AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
 const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
+const REPO_OWNER: &str = "demand-open-source";
+const REPO_NAME: &str = "demand-cli";
+const BIN_NAME: &str = "demand-cli";
 
 lazy_static! {
     static ref SV1_DOWN_LISTEN_ADDR: String =
@@ -313,7 +316,7 @@ fn check_update_proxy() {
     info!("Checking for latest released version...");
     // Determine the OS and map to the asset name
     let os = std::env::consts::OS;
-    let target_asset = match os {
+    let target_bin = match os {
         "linux" => "demand-cli-linux",
         "macos" => "demand-cli-macos",
         "windows" => "demand-cli-windows.exe",
@@ -323,15 +326,15 @@ fn check_update_proxy() {
         }
     };
 
-    debug!("Target-arch... {}", target_asset);
-    info!("Current version... {}", cargo_crate_version!());
+    debug!("OS: {}", target_bin);
+    debug!("DMND-PROXY version: {}", cargo_crate_version!());
 
     let updater = match backends::github::Update::configure()
-        .repo_owner("demand-open-source")
-        .repo_name("demand-cli")
-        .bin_name("demand-cli")
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name(BIN_NAME)
         .current_version(cargo_crate_version!())
-        .target(target_asset)
+        .target(target_bin)
         .show_output(false)
         .no_confirm(true)
         .build()
@@ -347,7 +350,7 @@ fn check_update_proxy() {
     match updater.update() {
         Ok(status) => match status {
             Status::UpToDate(_) => {
-                info!("Proxy is already up to date.");
+                info!("Starting latest version of DMND-PROXY.");
             }
             Status::Updated(version) => {
                 info!("Proxy updated to version {}. Please restart proxy", version);
