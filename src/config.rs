@@ -39,6 +39,8 @@ struct Args {
     config_file: Option<PathBuf>,
     #[clap(long = "api-server-port", short = 's')]
     api_server_port: Option<String>,
+    #[clap(long, short = 'm')]
+    monitor: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,6 +57,7 @@ struct ConfigFile {
     test: Option<bool>,
     listening_addr: Option<String>,
     api_server_port: Option<String>,
+    monitor: Option<bool>,
 }
 
 pub struct Configuration {
@@ -70,6 +73,7 @@ pub struct Configuration {
     test: bool,
     listening_addr: Option<String>,
     api_server_port: String,
+    monitor: bool,
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -137,6 +141,10 @@ impl Configuration {
         CONFIG.test
     }
 
+    pub fn monitor() -> bool {
+        CONFIG.monitor
+    }
+
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
@@ -157,6 +165,7 @@ impl Configuration {
                 test: None,
                 listening_addr: None,
                 api_server_port: None,
+                monitor: None,
             });
 
         let token = args
@@ -285,6 +294,8 @@ impl Configuration {
             .unwrap_or("off".to_string());
 
         let test = args.test || config.test.unwrap_or(false) || std::env::var("TEST").is_ok();
+        let monitor =
+            args.monitor || config.monitor.unwrap_or(false) || std::env::var("MONITOR").is_ok();
 
         Configuration {
             token,
@@ -299,6 +310,7 @@ impl Configuration {
             test,
             listening_addr,
             api_server_port,
+            monitor,
         }
     }
 }

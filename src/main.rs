@@ -11,9 +11,10 @@ use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
+use self_update::{backends, cargo_crate_version, Status};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 mod api;
 
 mod config;
@@ -60,20 +61,34 @@ lazy_static! {
 #[tokio::main]
 async fn main() {
     let log_level = Configuration::loglevel();
-
     let noise_connection_log_level = Configuration::nc_loglevel();
+
+    let file_appender = tracing_appender::rolling::hourly("./logs", "demand-proxy.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     //Disable noise_connection error (for now) because:
     // 1. It produce logs that are not very user friendly and also bloat the logs
     // 2. The errors resulting from noise_connection are handled. E.g if unrecoverable error from noise connection occurs during Pool connection: We either retry connecting immediatley or we update Proxy state to Pool Down
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        )
         .with(tracing_subscriber::EnvFilter::new(format!(
             "{},demand_sv2_connection::noise_connection_tokio={}",
             log_level, noise_connection_log_level
         )))
         .init();
+
     Configuration::token().expect("TOKEN is not set");
+
+    //`self_update` performs synchronous I/O so spawn_blocking is needed
+    if let Err(e) = tokio::task::spawn_blocking(check_update_proxy).await {
+        error!("An error occured while trying to update Proxy; {:?}", e);
+        ProxyState::update_inconsistency(Some(1));
+    };
 
     if Configuration::test() {
         info!("Connecting to test endpoint...");
@@ -236,18 +251,21 @@ async fn monitor(
 ) -> Reconnect {
     let mut should_check_upstreams_latency = 0;
     loop {
-        // Check if a better upstream exist every 100 seconds
-        if should_check_upstreams_latency == 10 * 100 {
-            should_check_upstreams_latency = 0;
-            if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
-                info!("Faster upstream detected. Reinitializing proxy...");
-                drop(abort_handles);
-                server_handle.abort(); // abort server
+        if Configuration::monitor() {
+            // Check if a better upstream exist every 100 seconds
+            if should_check_upstreams_latency == 10 * 100 {
+                should_check_upstreams_latency = 0;
+                if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
+                    info!("Faster upstream detected. Reinitializing proxy...");
+                    drop(abort_handles);
+                    server_handle.abort(); // abort server
 
-                // Needs a little to time to drop
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                return Reconnect::NewUpstream(new_upstream);
+                    // Needs a little to time to drop
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    return Reconnect::NewUpstream(new_upstream);
+                }
             }
+            should_check_upstreams_latency += 1;
         }
 
         // Monitor finished tasks
@@ -287,8 +305,57 @@ async fn monitor(
             return Reconnect::NoUpstream;
         }
 
-        should_check_upstreams_latency += 1;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+}
+
+fn check_update_proxy() {
+    info!("Checking for latest released version...");
+    // Determine the OS and map to the asset name
+    let os = std::env::consts::OS;
+    let target_asset = match os {
+        "linux" => "demand-cli-linux",
+        "macos" => "demand-cli-macos",
+        "windows" => "demand-cli-windows.exe",
+        _ => {
+            error!("Warning: Unsupported OS '{}', skipping update", os);
+            return;
+        }
+    };
+
+    debug!("Checking target-arch... {}", target_asset);
+    info!("Checking current version... {}", cargo_crate_version!());
+
+    let updater = match backends::github::Update::configure()
+        .repo_owner("demand-open-source")
+        .repo_name("demand-cli")
+        .bin_name("demand-cli")
+        .current_version(cargo_crate_version!())
+        .target(target_asset)
+        .show_output(false)
+        .build()
+    {
+        Ok(updater) => updater,
+        Err(e) => {
+            error!("Failed to configure update: {}", e);
+            return;
+        }
+    };
+
+    // Check and apply the update
+    match updater.update() {
+        Ok(status) => match status {
+            Status::UpToDate(_) => {
+                info!("Proxy is already up to date.");
+            }
+            Status::Updated(version) => {
+                info!("Proxy updated to version {}. Please restart proxy", version);
+                std::process::exit(0)
+            }
+        },
+        Err(e) => {
+            error!("Failed to update proxy: {}", e);
+        }
     }
 }
 
