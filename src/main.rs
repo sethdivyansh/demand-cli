@@ -323,8 +323,8 @@ fn check_update_proxy() {
         }
     };
 
-    debug!("Checking target-arch... {}", target_asset);
-    info!("Checking current version... {}", cargo_crate_version!());
+    debug!("Target-arch... {}", target_asset);
+    info!("Current version... {}", cargo_crate_version!());
 
     let updater = match backends::github::Update::configure()
         .repo_owner("demand-open-source")
@@ -333,6 +333,7 @@ fn check_update_proxy() {
         .current_version(cargo_crate_version!())
         .target(target_asset)
         .show_output(false)
+        .no_confirm(true)
         .build()
     {
         Ok(updater) => updater,
