@@ -41,6 +41,8 @@ struct Args {
     api_server_port: Option<String>,
     #[clap(long, short = 'm')]
     monitor: bool,
+    #[clap(long, short = 'u')]
+    auto_update: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +60,7 @@ struct ConfigFile {
     listening_addr: Option<String>,
     api_server_port: Option<String>,
     monitor: Option<bool>,
+    auto_update: Option<bool>,
 }
 
 pub struct Configuration {
@@ -74,6 +77,7 @@ pub struct Configuration {
     listening_addr: Option<String>,
     api_server_port: String,
     monitor: bool,
+    auto_update: bool,
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -145,6 +149,10 @@ impl Configuration {
         CONFIG.monitor
     }
 
+    pub fn auto_update() -> bool {
+        CONFIG.auto_update
+    }
+
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
@@ -166,6 +174,7 @@ impl Configuration {
                 listening_addr: None,
                 api_server_port: None,
                 monitor: None,
+                auto_update: None,
             });
 
         let token = args
@@ -294,8 +303,13 @@ impl Configuration {
             .unwrap_or("off".to_string());
 
         let test = args.test || config.test.unwrap_or(false) || std::env::var("TEST").is_ok();
+
         let monitor =
             args.monitor || config.monitor.unwrap_or(false) || std::env::var("MONITOR").is_ok();
+
+        let auto_update = args.auto_update
+            || config.auto_update.unwrap_or(true)
+            || std::env::var("AUTO_UPDATE").is_ok();
 
         Configuration {
             token,
@@ -311,6 +325,7 @@ impl Configuration {
             listening_addr,
             api_server_port,
             monitor,
+            auto_update,
         }
     }
 }

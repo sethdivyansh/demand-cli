@@ -66,19 +66,11 @@ async fn main() {
     let log_level = Configuration::loglevel();
     let noise_connection_log_level = Configuration::nc_loglevel();
 
-    let file_appender = tracing_appender::rolling::hourly("./logs", "demand-proxy.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-
     //Disable noise_connection error (for now) because:
     // 1. It produce logs that are not very user friendly and also bloat the logs
     // 2. The errors resulting from noise_connection are handled. E.g if unrecoverable error from noise connection occurs during Pool connection: We either retry connecting immediatley or we update Proxy state to Pool Down
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(non_blocking),
-        )
         .with(tracing_subscriber::EnvFilter::new(format!(
             "{},demand_sv2_connection::noise_connection_tokio={}",
             log_level, noise_connection_log_level
@@ -88,10 +80,12 @@ async fn main() {
     Configuration::token().expect("TOKEN is not set");
 
     //`self_update` performs synchronous I/O so spawn_blocking is needed
-    if let Err(e) = tokio::task::spawn_blocking(check_update_proxy).await {
-        error!("An error occured while trying to update Proxy; {:?}", e);
-        ProxyState::update_inconsistency(Some(1));
-    };
+    if Configuration::auto_update() {
+        if let Err(e) = tokio::task::spawn_blocking(check_update_proxy).await {
+            error!("An error occured while trying to update Proxy; {:?}", e);
+            ProxyState::update_inconsistency(Some(1));
+        };
+    }
 
     if Configuration::test() {
         info!("Connecting to test endpoint...");
@@ -322,7 +316,7 @@ fn check_update_proxy() {
         "windows" => "demand-cli-windows.exe",
         _ => {
             error!("Warning: Unsupported OS '{}', skipping update", os);
-            return;
+            unreachable!()
         }
     };
 
@@ -346,15 +340,38 @@ fn check_update_proxy() {
         }
     };
 
-    // Check and apply the update
     match updater.update() {
         Ok(status) => match status {
             Status::UpToDate(_) => {
                 info!("Starting latest version of DMND-PROXY.");
             }
             Status::Updated(version) => {
-                info!("Proxy updated to version {}. Please restart proxy", version);
-                std::process::exit(0)
+                info!("Proxy updated to version {}. Restarting Proxy", version);
+
+                let current_exe =
+                    std::env::current_exe().expect("Failed to get current executable path");
+
+                // Get original cli rgs
+                let args = std::env::args().skip(1).collect::<Vec<_>>();
+
+                #[cfg(unix)]
+                {
+                    // On Unix-like systems, replace the current process with the new binary
+                    use std::os::unix::process::CommandExt;
+                    let err = std::process::Command::new(current_exe).args(&args).exec();
+                    // If exec fails, log the error and exit
+                    error!("Failed to exec new binary: {:?}", err);
+                    std::process::exit(1);
+                }
+                #[cfg(not(unix))]
+                {
+                    // On Windows, spawn the new process and exit the current one
+                    std::process::Command::new(current_exe)
+                        .args(&args)
+                        .spawn()
+                        .expect("Failed to start proxy");
+                    std::process::exit(0);
+                }
             }
         },
         Err(e) => {
