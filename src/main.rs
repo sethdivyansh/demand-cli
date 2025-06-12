@@ -11,8 +11,8 @@ use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use self_update::{backends, cargo_crate_version, self_replace, update::UpdateStatus, TempDir};
-use std::{net::SocketAddr, time::Duration};
+use self_update::{backends, cargo_crate_version, update::UpdateStatus, TempDir};
+use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{debug, error, info, warn};
 mod api;
@@ -372,14 +372,33 @@ fn check_update_proxy() {
                 }
                 let bin_name = std::path::PathBuf::from(target_bin);
                 let new_exe = tmp_dir.path().join(&bin_name);
-                self_replace::self_replace(&new_exe).expect("Failed to replace file");
+                if let Err(e) = std::fs::rename(&new_exe, &original_path) {
+                    error!(
+                        "Failed to move new binary to {}: {}",
+                        original_path.display(),
+                        e
+                    );
+                    return;
+                }
 
-                // Get original cli rgs
+                let _ = std::fs::remove_dir_all(tmp_dir); // clean up tmp dir
+                                                          // Get original cli rgs
                 let args = std::env::args().skip(1).collect::<Vec<_>>();
 
                 #[cfg(unix)]
                 {
                     // On Unix-like systems, replace the current process with the new binary
+                    if let Err(e) =
+                        fs::set_permissions(&original_path, std::fs::Permissions::from_mode(0o755))
+                    {
+                        error!(
+                            "Failed to set executable permissions on {}: {}",
+                            original_path.display(),
+                            e
+                        );
+                        return;
+                    }
+
                     use std::os::unix::process::CommandExt;
                     let err = std::process::Command::new(&original_path)
                         .args(&args)
@@ -391,7 +410,7 @@ fn check_update_proxy() {
                 #[cfg(not(unix))]
                 {
                     // On Windows, spawn the new process and exit the current one
-                    std::process::Command::new(current_exe)
+                    std::process::Command::new(&original_path)
                         .args(&args)
                         .spawn()
                         .expect("Failed to start proxy");
