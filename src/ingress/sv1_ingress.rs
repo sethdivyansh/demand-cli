@@ -1,6 +1,9 @@
 use std::net::{IpAddr, SocketAddr};
 
-use crate::shared::{error::Sv1IngressError, utils::AbortOnDrop};
+use crate::{
+    config::Configuration,
+    shared::{error::Sv1IngressError, utils::AbortOnDrop},
+};
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
@@ -79,6 +82,9 @@ impl Downstream {
     ) -> Sv1IngressError {
         let task = tokio::spawn(async move {
             while let Some(Ok(message)) = recv.next().await {
+                if Configuration::sv1_ingress_log() {
+                    info!("Sending msg to upstream: {}", message);
+                }
                 if send.send(message).await.is_err() {
                     error!("Upstream dropped trying to send");
                     return Sv1IngressError::TranslatorDropped;
@@ -100,6 +106,9 @@ impl Downstream {
         let task = tokio::spawn(async move {
             while let Some(message) = recv.recv().await {
                 let message = message.replace(['\n', '\r'], "");
+                if Configuration::sv1_ingress_log() {
+                    info!("Sending msg to downstream: {}", message);
+                }
                 if send.send(message).await.is_err() {
                     warn!("Downstream dropped while trying to send message down");
                     return Sv1IngressError::DownstreamDropped;

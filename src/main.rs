@@ -11,7 +11,7 @@ use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use self_update::{backends, cargo_crate_version, Status};
+use self_update::{backends, cargo_crate_version, update::UpdateStatus, TempDir};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{debug, error, info, warn};
@@ -322,6 +322,9 @@ fn check_update_proxy() {
 
     debug!("OS: {}", target_bin);
     debug!("DMND-PROXY version: {}", cargo_crate_version!());
+    let original_path = std::env::current_exe().expect("Failed to get current executable path");
+    let tmp_dir = TempDir::new_in(::std::env::current_dir().expect("Failed to get current dir"))
+        .expect("Failed to create tmp dir");
 
     let updater = match backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -331,6 +334,7 @@ fn check_update_proxy() {
         .target(target_bin)
         .show_output(false)
         .no_confirm(true)
+        .bin_install_path(tmp_dir.path())
         .build()
     {
         Ok(updater) => updater,
@@ -340,25 +344,67 @@ fn check_update_proxy() {
         }
     };
 
-    match updater.update() {
+    match updater.update_extended() {
         Ok(status) => match status {
-            Status::UpToDate(_) => {
+            UpdateStatus::UpToDate => {
                 info!("Starting latest version of DMND-PROXY.");
             }
-            Status::Updated(version) => {
-                info!("Proxy updated to version {}. Restarting Proxy", version);
+            UpdateStatus::Updated(release) => {
+                info!(
+                    "Proxy updated to version {}. Restarting Proxy",
+                    release.version
+                );
+                for asset in release.assets {
+                    if asset.name == target_bin {
+                        let bin_name = std::path::PathBuf::from(target_bin);
+                        let new_exe = tmp_dir.path().join(&bin_name);
+                        let mut file =
+                            std::fs::File::create(&new_exe).expect("Failed to create file");
+                        let mut download = self_update::Download::from_url(&asset.download_url);
+                        download.set_header(
+                            reqwest::header::ACCEPT,
+                            reqwest::header::HeaderValue::from_static("application/octet-stream"), // to triggers a redirect to the actual binary.
+                        );
+                        download
+                            .download_to(&mut file)
+                            .expect("Failed to download file");
+                    }
+                }
+                let bin_name = std::path::PathBuf::from(target_bin);
+                let new_exe = tmp_dir.path().join(&bin_name);
+                if let Err(e) = std::fs::rename(&new_exe, &original_path) {
+                    error!(
+                        "Failed to move new binary to {}: {}",
+                        original_path.display(),
+                        e
+                    );
+                    return;
+                }
 
-                let current_exe =
-                    std::env::current_exe().expect("Failed to get current executable path");
-
-                // Get original cli rgs
+                let _ = std::fs::remove_dir_all(tmp_dir); // clean up tmp dir
+                                                          // Get original cli rgs
                 let args = std::env::args().skip(1).collect::<Vec<_>>();
 
                 #[cfg(unix)]
                 {
-                    // On Unix-like systems, replace the current process with the new binary
+                    use std::os::unix::fs::PermissionsExt;
                     use std::os::unix::process::CommandExt;
-                    let err = std::process::Command::new(current_exe).args(&args).exec();
+                    // On Unix-like systems, replace the current process with the new binary
+                    if let Err(e) = std::fs::set_permissions(
+                        &original_path,
+                        std::fs::Permissions::from_mode(0o755),
+                    ) {
+                        error!(
+                            "Failed to set executable permissions on {}: {}",
+                            original_path.display(),
+                            e
+                        );
+                        return;
+                    }
+
+                    let err = std::process::Command::new(&original_path)
+                        .args(&args)
+                        .exec();
                     // If exec fails, log the error and exit
                     error!("Failed to exec new binary: {:?}", err);
                     std::process::exit(1);
@@ -366,7 +412,7 @@ fn check_update_proxy() {
                 #[cfg(not(unix))]
                 {
                     // On Windows, spawn the new process and exit the current one
-                    std::process::Command::new(current_exe)
+                    std::process::Command::new(&original_path)
                         .args(&args)
                         .spawn()
                         .expect("Failed to start proxy");

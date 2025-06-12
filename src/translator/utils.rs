@@ -100,10 +100,10 @@ pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bo
 pub fn validate_share(
     request: &client_to_server::Submit<'static>,
     recent_notifies: &VecDeque<Notify<'static>>,
-    difficulty: f32,
+    difficulties: &VecDeque<f32>,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<sv1_api::utils::HexU32Be>,
-) -> bool {
+) -> Option<f32> {
     let recent_notifies = recent_notifies.clone();
     let matching_job = recent_notifies
         .iter()
@@ -116,13 +116,13 @@ pub fn validate_share(
                 "Share rejected: Job ID {} not found in recent notify msgs",
                 request.job_id
             );
-            return false;
+            return None;
         }
     };
     // Check job ID match
     if request.job_id != job.job_id {
         error!("Share rejected: Job ID mismatch");
-        return false;
+        return None;
     }
 
     let prev_hash_vec: Vec<u8> = job.prev_hash.clone().into();
@@ -160,9 +160,22 @@ pub fn validate_share(
 
     hash.reverse(); //convert to little-endian
     info!("Hash: {:?}", hash.to_vec().as_hex());
-    let target = Downstream::difficulty_to_target(difficulty);
-    info!("Target: {:?}", target.to_vec().as_hex());
-    hash <= target
+    // Check against difficulties from latest to earliest
+    for &difficulty in difficulties.iter().rev() {
+        let target = Downstream::difficulty_to_target(difficulty);
+        debug!(
+            "Checking difficulty: {}, Target: {:?}",
+            difficulty,
+            target.to_vec().as_hex()
+        );
+        if hash <= target {
+            info!("Target: {:?}", target.to_vec().as_hex());
+            return Some(difficulty); // Return the difficulty met
+        }
+    }
+
+    error!("Share rejected: Does not meet any difficulty");
+    None // Share does not meet any difficulty
 }
 
 pub fn get_hash(

@@ -41,7 +41,7 @@ pub struct DownstreamDifficultyConfig {
     pub estimated_downstream_hash_rate: f32,
     pub submits: VecDeque<std::time::Instant>,
     pub pid_controller: Pid<f32>,
-    pub current_difficulty: f32,
+    pub current_difficulties: VecDeque<f32>,
     pub initial_difficulty: f32,
 }
 
@@ -69,6 +69,13 @@ impl DownstreamDifficultyConfig {
 
     pub fn reset(&mut self) {
         self.submits.clear();
+    }
+
+    pub fn add_difficulty(&mut self, new_diff: f32) {
+        if self.current_difficulties.len() >= 3 {
+            self.current_difficulties.pop_front();
+        }
+        self.current_difficulties.push_back(new_diff);
     }
 }
 
@@ -159,11 +166,14 @@ impl Downstream {
         pid.p(pk, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
 
         let estimated_downstream_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
+        let mut current_difficulties = VecDeque::with_capacity(3);
+        current_difficulties.push_back(initial_difficulty);
+
         let difficulty_mgmt = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate,
             submits: vec![].into(),
             pid_controller: pid,
-            current_difficulty: initial_difficulty,
+            current_difficulties,
             initial_difficulty,
         };
 
@@ -442,31 +452,43 @@ impl IsServer<'static> for Downstream {
                     return false;
                 };
                 crate::translator::utils::update_share_count(self.connection_id); // update share count
-                                                                                  //check share is valid
-                if validate_share(
+
+                //check share is valid
+                if let Some(met_difficulty) = validate_share(
                     request,
                     &self.recent_notifies,
-                    self.difficulty_mgmt.current_difficulty,
+                    &self.difficulty_mgmt.current_difficulties,
                     self.extranonce1.clone(),
                     self.version_rolling_mask.clone(),
                 ) {
-                    let to_send = SubmitShareWithChannelId {
-                        channel_id: self.connection_id,
-                        share: request.clone(),
-                        extranonce: self.extranonce1.clone(),
-                        extranonce2_len: self.extranonce2_len,
-                        version_rolling_mask: self.version_rolling_mask.clone(),
-                    };
-                    if let Err(e) = self
-                        .tx_sv1_bridge
-                        .try_send(DownstreamMessages::SubmitShares(to_send))
+                    // Only forward upstream if the share meets the latest difficulty
+                    if let Some(latest_difficulty) =
+                        self.difficulty_mgmt.current_difficulties.back()
                     {
-                        error!("Failed to start receive downstream task: {e:?}");
-                        self.stats_sender.update_rejected_shares(self.connection_id);
-                        // Return false because submit was not properly handled
-                        return false;
-                    };
+                        if met_difficulty == *latest_difficulty {
+                            let to_send = SubmitShareWithChannelId {
+                                channel_id: self.connection_id,
+                                share: request.clone(),
+                                extranonce: self.extranonce1.clone(),
+                                extranonce2_len: self.extranonce2_len,
+                                version_rolling_mask: self.version_rolling_mask.clone(),
+                            };
+                            if let Err(e) = self
+                                .tx_sv1_bridge
+                                .try_send(DownstreamMessages::SubmitShares(to_send))
+                            {
+                                error!("Failed to start receive downstream task: {e:?}");
+                                self.stats_sender.update_rejected_shares(self.connection_id);
+                                // Return false because submit was not properly handled
+                                return false;
+                            }
+                        }
+                    }
                     self.stats_sender.update_accepted_shares(self.connection_id);
+                    info!(
+                        "Share for Job {} and difficulty {} is accepted",
+                        request.job_id, met_difficulty
+                    );
                     true
                 } else {
                     error!("Share rejected: Invalid share");
