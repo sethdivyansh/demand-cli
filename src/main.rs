@@ -11,7 +11,7 @@ use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use self_update::{backends, cargo_crate_version, Status};
+use self_update::{backends, cargo_crate_version, self_replace, update::UpdateStatus, TempDir};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{debug, error, info, warn};
@@ -322,6 +322,9 @@ fn check_update_proxy() {
 
     debug!("OS: {}", target_bin);
     debug!("DMND-PROXY version: {}", cargo_crate_version!());
+    let original_path = std::env::current_exe().expect("Failed to get current executable path");
+    let tmp_dir = TempDir::new_in(::std::env::current_dir().expect("Failed to get current dir"))
+        .expect("Failed to create tmp dir");
 
     let updater = match backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -331,6 +334,7 @@ fn check_update_proxy() {
         .target(target_bin)
         .show_output(false)
         .no_confirm(true)
+        .bin_install_path(tmp_dir.path())
         .build()
     {
         Ok(updater) => updater,
@@ -340,16 +344,35 @@ fn check_update_proxy() {
         }
     };
 
-    match updater.update() {
+    match updater.update_extended() {
         Ok(status) => match status {
-            Status::UpToDate(_) => {
+            UpdateStatus::UpToDate => {
                 info!("Starting latest version of DMND-PROXY.");
             }
-            Status::Updated(version) => {
-                info!("Proxy updated to version {}. Restarting Proxy", version);
-
-                let current_exe =
-                    std::env::current_exe().expect("Failed to get current executable path");
+            UpdateStatus::Updated(release) => {
+                info!(
+                    "Proxy updated to version {}. Restarting Proxy",
+                    release.version
+                );
+                for asset in release.assets {
+                    if asset.name == target_bin {
+                        let bin_name = std::path::PathBuf::from(target_bin);
+                        let new_exe = tmp_dir.path().join(&bin_name);
+                        let mut file =
+                            std::fs::File::create(&new_exe).expect("Failed to create file");
+                        let mut download = self_update::Download::from_url(&asset.download_url);
+                        download.set_header(
+                            reqwest::header::ACCEPT,
+                            reqwest::header::HeaderValue::from_static("application/octet-stream"), // to triggers a redirect to the actual binary.
+                        );
+                        download
+                            .download_to(&mut file)
+                            .expect("Failed to download file");
+                    }
+                }
+                let bin_name = std::path::PathBuf::from(target_bin);
+                let new_exe = tmp_dir.path().join(&bin_name);
+                self_replace::self_replace(&new_exe).expect("Failed to replace file");
 
                 // Get original cli rgs
                 let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -358,7 +381,9 @@ fn check_update_proxy() {
                 {
                     // On Unix-like systems, replace the current process with the new binary
                     use std::os::unix::process::CommandExt;
-                    let err = std::process::Command::new(current_exe).args(&args).exec();
+                    let err = std::process::Command::new(&original_path)
+                        .args(&args)
+                        .exec();
                     // If exec fails, log the error and exit
                     error!("Failed to exec new binary: {:?}", err);
                     std::process::exit(1);

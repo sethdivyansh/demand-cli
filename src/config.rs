@@ -21,6 +21,8 @@ struct Args {
     loglevel: Option<String>,
     #[clap(long = "nc", short = 'n')]
     noise_connection_log: Option<String>,
+    #[clap(long = "sv1_loglevel")]
+    sv1_loglevel: bool,
     #[clap(long = "delay")]
     delay: Option<u64>,
     #[clap(long = "interval", short = 'i')]
@@ -56,6 +58,7 @@ struct ConfigFile {
     downstream_hashrate: Option<String>,
     loglevel: Option<String>,
     nc_loglevel: Option<String>,
+    sv1_log: Option<bool>,
     test: Option<bool>,
     listening_addr: Option<String>,
     api_server_port: Option<String>,
@@ -73,6 +76,7 @@ pub struct Configuration {
     downstream_hashrate: f32,
     loglevel: String,
     nc_loglevel: String,
+    sv1_log: bool,
     test: bool,
     listening_addr: Option<String>,
     api_server_port: String,
@@ -111,6 +115,7 @@ impl Configuration {
     pub fn downstream_listening_addr() -> Option<String> {
         CONFIG.listening_addr.clone()
     }
+
     pub fn api_server_port() -> String {
         CONFIG.api_server_port.clone()
     }
@@ -139,6 +144,9 @@ impl Configuration {
                 "off"
             }
         }
+    }
+    pub fn sv1_ingress_log() -> bool {
+        CONFIG.sv1_log
     }
 
     pub fn test() -> bool {
@@ -170,6 +178,7 @@ impl Configuration {
                 downstream_hashrate: None,
                 loglevel: None,
                 nc_loglevel: None,
+                sv1_log: None,
                 test: None,
                 listening_addr: None,
                 api_server_port: None,
@@ -302,6 +311,10 @@ impl Configuration {
             .or_else(|| std::env::var("NC_LOGLEVEL").ok())
             .unwrap_or("off".to_string());
 
+        let sv1_log = args.sv1_loglevel
+            || config.sv1_log.unwrap_or(false)
+            || std::env::var("SV1_LOGLEVEL").is_ok();
+
         let test = args.test || config.test.unwrap_or(false) || std::env::var("TEST").is_ok();
 
         let monitor =
@@ -321,6 +334,7 @@ impl Configuration {
             downstream_hashrate,
             loglevel,
             nc_loglevel,
+            sv1_log,
             test,
             listening_addr,
             api_server_port,

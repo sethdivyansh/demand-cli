@@ -19,7 +19,11 @@ impl Downstream {
     pub async fn init_difficulty_management(self_: &Arc<Mutex<Self>>) -> ProxyResult<()> {
         let (diff, stats_sender, connection_id, estimated_hashrate) = self_.safe_lock(|d| {
             (
-                d.difficulty_mgmt.current_difficulty,
+                d.difficulty_mgmt
+                    .current_difficulties
+                    .back()
+                    .copied()
+                    .unwrap_or(d.difficulty_mgmt.initial_difficulty),
                 d.stats_sender.clone(),
                 d.connection_id,
                 d.difficulty_mgmt.estimated_downstream_hash_rate,
@@ -200,16 +204,20 @@ impl Downstream {
             return Err(Error::Unrecoverable);
         }
 
-        let (mut pid, current_difficulty, initial_difficulty) = self_.safe_lock(|d| {
+        let (mut pid, latest_difficulty, initial_difficulty) = self_.safe_lock(|d| {
             (
                 d.difficulty_mgmt.pid_controller,
-                d.difficulty_mgmt.current_difficulty,
+                d.difficulty_mgmt
+                    .current_difficulties
+                    .back()
+                    .copied()
+                    .unwrap_or(d.difficulty_mgmt.initial_difficulty),
                 d.difficulty_mgmt.initial_difficulty,
             )
         })?;
 
         let pid_output = pid.next_control_output(realized_share_per_min).output;
-        let new_difficulty = (current_difficulty + pid_output).max(initial_difficulty * 0.1);
+        let new_difficulty = (latest_difficulty + pid_output).max(initial_difficulty * 0.1);
         let nearest = nearest_power_of_10(new_difficulty);
         if nearest != initial_difficulty {
             let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, nearest * 10.0);
@@ -229,7 +237,7 @@ impl Downstream {
         } else {
             // TODO check if we can improve stale share with a threshold here
             let threshold = 0.0;
-            let change = (new_difficulty - current_difficulty).abs() / current_difficulty;
+            let change = (new_difficulty - latest_difficulty).abs() / latest_difficulty;
             if change > threshold {
                 let new_estimation =
                     Self::estimate_hash_rate_from_difficulty(new_difficulty, crate::SHARE_PER_MIN);
@@ -259,7 +267,7 @@ impl Downstream {
                 let old_estimation = d.difficulty_mgmt.estimated_downstream_hash_rate;
                 d.difficulty_mgmt.estimated_downstream_hash_rate = new_estimation;
                 d.difficulty_mgmt.reset();
-                d.difficulty_mgmt.current_difficulty = current_diff;
+                d.difficulty_mgmt.add_difficulty(current_diff);
 
                 (
                     d.upstream_difficulty_config.clone(),
@@ -417,10 +425,12 @@ mod test {
     }
 
     async fn test_converge_to_spm(start_hashrate: f64) {
+        let mut diff = VecDeque::new();
+        diff.push_back(10_000_000_000.0);
         let downstream_conf = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate: 0.0, // updated below
             pid_controller: Pid::new(10.0, 100_000_000.0),
-            current_difficulty: 10_000_000_000.0,
+            current_difficulties: diff,
             submits: VecDeque::new(),
             initial_difficulty: 10_000_000_000.0,
         };
@@ -466,8 +476,10 @@ mod test {
             mock_mine(initial_target.clone().into(), &mut share);
             Downstream::save_share(downstream.clone()).unwrap();
             let _ = Downstream::try_update_difficulty_settings(&downstream).await;
-            initial_target =
-                Downstream::difficulty_to_target(downstream_conf.current_difficulty).into();
+            initial_target = Downstream::difficulty_to_target(
+                *downstream_conf.current_difficulties.back().unwrap(),
+            )
+            .into();
             elapsed = timer.elapsed();
         }
         let expected_0s = trailing_0s(expected_target.inner_as_ref().to_vec());

@@ -28,8 +28,14 @@ pub async fn start_notify(
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
-        let (upstream_difficulty_config, stats_sender) = downstream
-            .safe_lock(|d| (d.upstream_difficulty_config.clone(), d.stats_sender.clone()))?;
+        let (upstream_difficulty_config, stats_sender, latest_diff) =
+            downstream.safe_lock(|d| {
+                (
+                    d.upstream_difficulty_config.clone(),
+                    d.stats_sender.clone(),
+                    d.difficulty_mgmt.current_difficulties.back().copied(),
+                )
+            })?;
         upstream_difficulty_config.safe_lock(|c| {
             c.channel_nominal_hashrate += *crate::EXPECTED_SV1_HASHPOWER;
         })?;
@@ -112,6 +118,10 @@ pub async fn start_notify(
                         }
 
                         apply_mask(mask.clone(), &mut sv1_mining_notify_msg);
+                        debug!(
+                            "Sending Job {:?} to miner. Difficulty: {:?}",
+                            &sv1_mining_notify_msg, latest_diff
+                        );
                         let message: json_rpc::Message = sv1_mining_notify_msg.into();
                         Downstream::send_message_downstream(downstream.clone(), message).await;
                     }
