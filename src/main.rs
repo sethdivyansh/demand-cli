@@ -12,7 +12,7 @@ use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
 use self_update::{backends, cargo_crate_version, update::UpdateStatus, TempDir};
-use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{debug, error, info, warn};
 mod api;
@@ -387,10 +387,13 @@ fn check_update_proxy() {
 
                 #[cfg(unix)]
                 {
+                    use std::os::unix::fs::PermissionsExt;
+                    use std::os::unix::process::CommandExt;
                     // On Unix-like systems, replace the current process with the new binary
-                    if let Err(e) =
-                        fs::set_permissions(&original_path, std::fs::Permissions::from_mode(0o755))
-                    {
+                    if let Err(e) = std::fs::set_permissions(
+                        &original_path,
+                        std::fs::Permissions::from_mode(0o755),
+                    ) {
                         error!(
                             "Failed to set executable permissions on {}: {}",
                             original_path.display(),
@@ -399,7 +402,6 @@ fn check_update_proxy() {
                         return;
                     }
 
-                    use std::os::unix::process::CommandExt;
                     let err = std::process::Command::new(&original_path)
                         .args(&args)
                         .exec();
