@@ -37,7 +37,7 @@ export function parseMempoolTransaction(tx: any): MempoolTransaction {
     descendant_size: tx.descendant_size,
     ancestor_count: tx.ancestor_count,
     ancestor_size: tx.ancestor_size,
-    wtxid: { txid: tx.wtxid.txid, wtxid: tx.wtxid.wtxid },
+    wtxid: tx.wtxid || tx.txid,
     fees: {
       base: tx.fees.base * 1e8,
       modified: tx.fees.modified * 1e8,
@@ -48,6 +48,6 @@ export function parseMempoolTransaction(tx: any): MempoolTransaction {
     depends: tx.depends || [],
     spent_by: tx.spent_by || [],
     bip125_replaceable: tx.bip125_replaceable,
-    unbroadcast: tx.unbroadcast || null
+    unbroadcast: tx.unbroadcast
   };
 }

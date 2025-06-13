@@ -5,11 +5,6 @@ interface Fee {
   descendant: number;
 }
 
-interface Txid {
-  txid: string;
-  wtxid: string;
-}
-
 export interface MempoolTransaction {
   txid: string;
   vsize: number;
@@ -20,11 +15,11 @@ export interface MempoolTransaction {
   descendant_size: number;
   ancestor_count: number;
   ancestor_size: number;
-  wtxid: Txid;
+  wtxid: String;
   fees: Fee;
   feeRate: number;
-  depends: Txid[];
-  spent_by: Txid[];
+  depends: String[];
+  spent_by: String[];
   bip125_replaceable: boolean;
-  unbroadcast: boolean | null;
+  unbroadcast: boolean;
 }

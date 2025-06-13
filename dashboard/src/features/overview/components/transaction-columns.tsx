@@ -83,8 +83,7 @@ export const transactionColumns: ColumnDef<MempoolTransaction>[] = [
     meta: {
       label: 'Fee Rate',
       variant: 'range',
-      range: [0, 1000],
-      unit: 'sat/vB'
+      range: [0, 1000]
     },
     enableColumnFilter: true,
     enableSorting: true
@@ -109,8 +108,33 @@ export const transactionColumns: ColumnDef<MempoolTransaction>[] = [
     meta: {
       label: 'vsize',
       variant: 'range',
-      range: [0, 1000],
-      unit: 'vB'
+      range: [0, 1000000]
+    },
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'Base Fee',
+    accessorKey: 'fees.base',
+    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
+      <DataTableColumnHeader
+        column={column}
+        title='Base Fee (sat)'
+        className='w-full justify-center'
+      />
+    ),
+    cell: ({ cell }) => {
+      const baseFee = cell.getValue<MempoolTransaction['fees']['base']>();
+      return (
+        <div className='flex h-8 items-center justify-center gap-1'>
+          {baseFee.toLocaleString()}
+        </div>
+      );
+    },
+    meta: {
+      label: 'Base Fee',
+      variant: 'range',
+      range: [0, 1000000]
     },
     enableSorting: true,
     enableColumnFilter: true
@@ -292,4 +316,26 @@ export const transactionColumns: ColumnDef<MempoolTransaction>[] = [
     enableSorting: true,
     enableColumnFilter: true
   }
+];
+
+export const selectedTransactionColumns: ColumnDef<MempoolTransaction>[] = [
+  {
+    id: 'select',
+    cell: ({ row }) => (
+      <Checkbox
+        checked={row.getIsSelected()}
+        onCheckedChange={(value) => row.toggleSelected(!!value)}
+        aria-label='Select row'
+      />
+    ),
+    meta: {
+      label: 'Checkbox',
+      placeholder: 'deselect transaction',
+      variant: 'text',
+      icon: Text
+    },
+    size: 32,
+    enableHiding: false
+  },
+  ...transactionColumns.slice(1, 5)
 ];
