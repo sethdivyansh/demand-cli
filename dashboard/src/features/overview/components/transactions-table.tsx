@@ -6,14 +6,9 @@ import { DataTableToolbar } from '@/components/ui/table/data-table-toolbar';
 import { DataTableSortList } from '@/components/ui/table/data-table-sort-list';
 import { useDataTable } from '@/hooks/use-data-table';
 import type { MempoolTransaction } from '@/types/mempool-transaction';
-import {
-  transactionColumns,
-  selectedTransactionColumns
-} from './transaction-columns';
-import { ColumnDef, Row } from '@tanstack/react-table';
+import { transactionColumns } from './transaction-columns';
+import { SelectedTransactionsModal } from './selected-transactions-modal';
 import React from 'react';
-import { Modal } from '@/components/ui/modal';
-import { Checkbox } from '@/components/ui/checkbox';
 
 interface Props {
   data: MempoolTransaction[];
@@ -23,6 +18,7 @@ interface Props {
 
 export function TransactionsTable({ data, isFetching, onToggle }: Props) {
   const [isModalOpen, setIsModalOpen] = React.useState(false);
+
   const { table } = useDataTable<MempoolTransaction>({
     data,
     columns: transactionColumns,
@@ -30,37 +26,20 @@ export function TransactionsTable({ data, isFetching, onToggle }: Props) {
   });
 
   const selectedRows = table.getSelectedRowModel().rows;
-
-  // Build customized columns for the modal's table to sync selection with the main table
-  const customizedSelectedColumns = React.useMemo<
-    ColumnDef<MempoolTransaction>[]
-  >(
-    () =>
-      selectedTransactionColumns.map((col) => {
-        if (col.id === 'select') {
-          return {
-            ...col,
-            cell: ({ row }: { row: Row<MempoolTransaction> }) => (
-              <Checkbox
-                checked={table.getRow(row.id)?.getIsSelected()}
-                onCheckedChange={(value) =>
-                  table.getRow(row.id)?.toggleSelected(!!value)
-                }
-                aria-label='Select row'
-              />
-            )
-          } as ColumnDef<MempoolTransaction>;
-        }
-        return col;
-      }),
-    [table]
+  const selectedData = React.useMemo(
+    () => selectedRows.map((row) => row.original),
+    [selectedRows]
   );
 
-  const { table: selectedTxTable } = useDataTable<MempoolTransaction>({
-    data: selectedRows.map((row) => row.original),
-    columns: customizedSelectedColumns,
-    getRowId: (r) => r.txid
-  });
+  const handleModal = (open: boolean) => {
+    if (open) {
+      setIsModalOpen(true);
+      if (isFetching) onToggle();
+    } else {
+      setIsModalOpen(false);
+      if (!isFetching) onToggle();
+    }
+  };
 
   return (
     <>
@@ -72,7 +51,7 @@ export function TransactionsTable({ data, isFetching, onToggle }: Props) {
               <Button
                 variant='outline'
                 size='sm'
-                onClick={() => setIsModalOpen(true)}
+                onClick={() => handleModal(true)}
                 disabled={selectedRows.length === 0}
               >
                 View Selected ({selectedRows.length})
@@ -89,31 +68,12 @@ export function TransactionsTable({ data, isFetching, onToggle }: Props) {
           </DataTable>
         </div>
       </Card>
-      <Modal
-        title='Selected Transactions'
-        description='Review the selected transactions'
+      <SelectedTransactionsModal
         isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        className='w-full max-w-6xl overflow-scroll sm:max-w-6xl'
-      >
-        <div className='max-h-[75vh] overflow-auto'>
-          <DataTable table={selectedTxTable}>
-            <div className='flex items-center gap-2 px-4 py-2'>
-              <DataTableToolbar table={selectedTxTable} />
-              <DataTableSortList table={selectedTxTable} />
-              {selectedRows.length > 0 && (
-                <Button
-                  variant='destructive'
-                  size='sm'
-                  onClick={() => table.toggleAllRowsSelected(false)}
-                >
-                  Deselect All
-                </Button>
-              )}
-            </div>
-          </DataTable>
-        </div>
-      </Modal>
+        selectedData={selectedData}
+        parentTable={table}
+        handleModal={handleModal}
+      />
     </>
   );
 }
