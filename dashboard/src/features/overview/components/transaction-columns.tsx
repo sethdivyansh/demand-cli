@@ -1,9 +1,141 @@
-import { Column, ColumnDef } from '@tanstack/react-table';
+import {
+  ColumnDef,
+  Row,
+  HeaderContext,
+  CellContext
+} from '@tanstack/react-table';
 import { Checkbox } from '@/components/ui/checkbox';
 import { DataTableColumnHeader } from '@/components/ui/table/data-table-column-header';
 import { Text } from 'lucide-react';
 import type { MempoolTransaction } from '@/types/mempool-transaction';
 import React from 'react';
+
+const renderCell = (content: React.ReactNode) => (
+  <div className='flex h-8 items-center justify-center gap-1'>{content}</div>
+);
+
+type ColumnConfig = {
+  id: string;
+  accessorKey: string;
+  title: string;
+  formatter: (v: any) => React.ReactNode;
+  meta?: any;
+  enableSorting: boolean;
+  enableColumnFilter: boolean;
+  filterFn?: (row: Row<MempoolTransaction>, id: string, value: any) => boolean;
+};
+
+const columnsConfig: ColumnConfig[] = [
+  {
+    id: 'txid',
+    accessorKey: 'txid',
+    title: 'Txid',
+    formatter: (v: string) => v.slice(0, 4) + '...' + v.slice(-4),
+    meta: {
+      label: 'txid',
+      placeholder: 'Search by txid',
+      variant: 'text',
+      icon: Text
+    },
+    enableSorting: false,
+    enableColumnFilter: true
+  },
+  {
+    id: 'feeRate',
+    accessorKey: 'feeRate',
+    title: 'FeeRate (sat/vB)',
+    formatter: (v: number) => v.toPrecision(4),
+    meta: { label: 'Fee Rate', variant: 'range', range: [0, 1000] },
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'vsize',
+    accessorKey: 'vsize',
+    title: 'Size (vB)',
+    formatter: (v: number) => v,
+    meta: { label: 'vsize', variant: 'range', range: [0, 1000000] },
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'fees.base',
+    accessorKey: 'fees.base',
+    title: 'Base Fee (sat)',
+    formatter: (v: number) => v.toLocaleString(),
+    meta: { label: 'Base Fee', variant: 'range', range: [0, 1000000] },
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'depends',
+    accessorKey: 'depends',
+    title: 'Depends On',
+    formatter: (v: any[]) => v.length,
+    meta: { label: 'Depends On', variant: 'number' },
+    enableSorting: true,
+    enableColumnFilter: true,
+    filterFn: (row: Row<MempoolTransaction>, id: string, value: number) =>
+      row.getValue<any[]>(id).length === value
+  },
+  {
+    id: 'descendant_count',
+    accessorKey: 'descendant_count',
+    title: 'Descendant Count',
+    formatter: (v: number) => v,
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'descendant_size',
+    accessorKey: 'descendant_size',
+    title: 'Descendant Size',
+    formatter: (v: number) => v,
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'ancestor_count',
+    accessorKey: 'ancestor_count',
+    title: 'Ancestor Count',
+    formatter: (v: number) => v,
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'ancestor_size',
+    accessorKey: 'ancestor_size',
+    title: 'Ancestor Size',
+    formatter: (v: number) => v,
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'time',
+    accessorKey: 'time',
+    title: 'Time',
+    formatter: (v: number) => new Date(v * 1000).toLocaleString(),
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'height',
+    accessorKey: 'height',
+    title: 'Height',
+    formatter: (v: number) => v,
+    enableSorting: true,
+    enableColumnFilter: true
+  },
+  {
+    id: 'bip125_replaceable',
+    accessorKey: 'bip125_replaceable',
+    title: 'BIP125 Replaceable',
+    formatter: (v: boolean) => <Checkbox checked={v} disabled />,
+    meta: { label: 'BIP125 Replaceable', variant: 'boolean' },
+    enableSorting: true,
+    enableColumnFilter: true
+  }
+];
 
 export const transactionColumns: ColumnDef<MempoolTransaction>[] = [
   {
@@ -34,288 +166,24 @@ export const transactionColumns: ColumnDef<MempoolTransaction>[] = [
     size: 32,
     enableHiding: false
   },
-  {
-    id: 'txid',
-    accessorKey: 'txid',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Txid'
-        className='flex justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const txid = cell.getValue<MempoolTransaction['txid']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {txid.slice(0, 4) + '...' + txid.slice(-4)}
-        </div>
-      );
-    },
-    meta: {
-      label: 'txid',
-      placeholder: 'Search by txid',
-      variant: 'text',
-      icon: Text
-    },
-    enableHiding: false,
-    enableColumnFilter: true,
-    enableSorting: false
-  },
-  {
-    id: 'feeRate',
-    accessorKey: 'feeRate',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='FeeRate (sat/vB)'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const feeRate = cell.getValue<MempoolTransaction['feeRate']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {feeRate.toPrecision(4)}
-        </div>
-      );
-    },
-    meta: {
-      label: 'Fee Rate',
-      variant: 'range',
-      range: [0, 1000]
-    },
-    enableColumnFilter: true,
-    enableSorting: true
-  },
-  {
-    id: 'vsize',
-    accessorKey: 'vsize',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Size (vB)'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const size = cell.getValue<MempoolTransaction['vsize']>();
 
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>{size}</div>
-      );
-    },
-    meta: {
-      label: 'vsize',
-      variant: 'range',
-      range: [0, 1000000]
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'Base Fee',
-    accessorKey: 'fees.base',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
+  ...columnsConfig.map((cfg) => ({
+    id: cfg.id,
+    accessorKey: cfg.accessorKey,
+    header: ({ column }: HeaderContext<MempoolTransaction, any>) => (
       <DataTableColumnHeader
         column={column}
-        title='Base Fee (sat)'
+        title={cfg.title}
         className='w-full justify-center'
       />
     ),
-    cell: ({ cell }) => {
-      const baseFee = cell.getValue<MempoolTransaction['fees']['base']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {baseFee.toLocaleString()}
-        </div>
-      );
-    },
-    meta: {
-      label: 'Base Fee',
-      variant: 'range',
-      range: [0, 1000000]
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'depends',
-    accessorKey: 'depends',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Depends On'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const dependsOn = cell.getValue<MempoolTransaction['depends']>();
-
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {dependsOn.length}
-        </div>
-      );
-    },
-    meta: {
-      label: 'Depends On',
-      variant: 'number'
-    },
-    enableSorting: true,
-    enableColumnFilter: true,
-    filterFn: (row, id, value) => {
-      const dependsOn = row.getValue<MempoolTransaction['depends']>(id);
-      return dependsOn.length == value;
-    }
-  },
-  {
-    id: 'descendant_count',
-    accessorKey: 'descendant_count',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Descendant Count'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const count = cell.getValue<MempoolTransaction['descendant_count']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {count}
-        </div>
-      );
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'descendant_size',
-    accessorKey: 'descendant_size',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Descendant Size'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const size = cell.getValue<MempoolTransaction['descendant_size']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>{size}</div>
-      );
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'ancestor_count',
-    accessorKey: 'ancestor_count',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Ancestor Count'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const count = cell.getValue<MempoolTransaction['ancestor_count']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {count}
-        </div>
-      );
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'ancestor_size',
-    accessorKey: 'ancestor_size',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Ancestor Size'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const size = cell.getValue<MempoolTransaction['ancestor_size']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>{size}</div>
-      );
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'time',
-    accessorKey: 'time',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Time'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const time = cell.getValue<MempoolTransaction['time']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {new Date(time * 1000).toLocaleString()}
-        </div>
-      );
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'height',
-    accessorKey: 'height',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='Height'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const height = cell.getValue<MempoolTransaction['height']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          {height}
-        </div>
-      );
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  },
-  {
-    id: 'bip125_replaceable',
-    accessorKey: 'bip125_replaceable',
-    header: ({ column }: { column: Column<MempoolTransaction, unknown> }) => (
-      <DataTableColumnHeader
-        column={column}
-        title='BIP125 Replaceable'
-        className='w-full justify-center'
-      />
-    ),
-    cell: ({ cell }) => {
-      const bip125 = cell.getValue<MempoolTransaction['bip125_replaceable']>();
-      return (
-        <div className='flex h-8 items-center justify-center gap-1'>
-          <Checkbox checked={bip125} disabled />
-        </div>
-      );
-    },
-    meta: {
-      label: 'BIP125 Replaceable',
-      variant: 'boolean'
-    },
-    enableSorting: true,
-    enableColumnFilter: true
-  }
+    cell: ({ cell }: CellContext<MempoolTransaction, any>) =>
+      renderCell(cfg.formatter(cell.getValue())),
+    ...(cfg.meta && { meta: cfg.meta }),
+    enableSorting: cfg.enableSorting,
+    enableColumnFilter: cfg.enableColumnFilter,
+    ...(cfg.filterFn && { filterFn: cfg.filterFn })
+  }))
 ];
 
 export const selectedTransactionColumns: ColumnDef<MempoolTransaction>[] = [
