@@ -423,6 +423,7 @@ impl Bridge {
 
         self_
             .safe_lock(|s| {
+                s.valid_job_ids.clear();
                 s.channel_factory
                     .on_new_prev_hash(sv2_set_new_prev_hash.clone())
             })
