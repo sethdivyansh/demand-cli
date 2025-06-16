@@ -251,6 +251,7 @@ impl Bridge {
         share: SubmitShareWithChannelId,
     ) -> ProxyResult<'static, ()> {
         let channel_id = share.channel_id;
+        let job_id = share.share.job_id.clone();
         info!("Bridge recv share for channel {:?}", channel_id);
         let (tx_sv2_submit_shares_ext, target_mutex) = self_
             .safe_lock(|s| (s.tx_sv2_submit_shares_ext.clone(), s.target.clone()))
@@ -265,7 +266,7 @@ impl Bridge {
             .safe_lock(|s| {
                 let job_id = share.share.job_id.parse::<u32>().expect("Invalid job_id");
                 if !s.valid_job_ids.contains(&job_id) {
-                    info!("Share rejected: job_id {} not in last two jobs", job_id);
+                    warn!("Share rejected: job_id {} not in last two jobs", job_id);
                     return Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob); // rejected
                 }
                 s.channel_factory.set_target(&mut upstream_target);
@@ -323,6 +324,9 @@ impl Bridge {
                                 count
                             );
                 }
+            }
+            Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob) => {
+                warn!("Channel factory can not get this share's job_id: {}", job_id);
             }
             Err(e) => {
                 return Err(Error::RolesSv2Logic(e));
@@ -387,6 +391,7 @@ impl Bridge {
 
         self_
             .safe_lock(|s| {
+                s.valid_job_ids.clear();
                 s.channel_factory
                     .on_new_prev_hash(sv2_set_new_prev_hash.clone())
             })

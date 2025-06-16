@@ -1,6 +1,6 @@
 [package]
 name = "demand-cli"
-version = "0.1.8"
+version = "0.1.10"
 edition = "2021"
 
 [dependencies]
@@ -40,7 +40,7 @@ reqwest ={ version = "0.12.20"}
 #demand-sv2-connection = { path = "../demand-sv2-connection"}
 #roles_logic_sv2 = { path = "../stratum/protocols/v2/roles-logic-sv2"}
 #framing_sv2 = { path = "../stratum/protocols/v2/framing-sv2"}
-#binary_sv2 = { path = "../stratum/protocols/v2/binary-sv2/binary-sv2"}
+#binary_sv2 = { path = "../stratum/protocols/v2/binary-sv2"}
 #noise_sv2 = {path ="../stratum/protocols/v2/noise-sv2"}
 #codec_sv2 = {features = ["noise_sv2","with_buffer_pool"], path = "../stratum/protocols/v2/codec-sv2" }
 #sv1_api = {path = "../stratum/protocols/v1" }
