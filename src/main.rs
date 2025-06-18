@@ -88,7 +88,7 @@ async fn main() {
     }
 
     if Configuration::test() {
-        info!("Connecting to test endpoint...");
+        info!("Package is running in test mode");
     }
 
     let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
@@ -117,21 +117,18 @@ async fn initialize_proxy(
     epsilon: Duration,
 ) {
     loop {
-        // Initial setup for the proxy
         let stats_sender = api::stats::StatsSender::new();
-
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
                 Ok(connection) => connection,
                 Err(_) => {
-                    error!("No upstream available. Retrying...");
-                    warn!("Are you using the correct TOKEN??");
-                    let mut secs = 10;
-                    while secs > 0 {
-                        tracing::warn!("Retrying in {} seconds...", secs);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        secs -= 1;
-                    }
+                    error!("No upstream available. Retrying in 5 seconds...");
+                    warn!(
+                        "Please make sure the your token {} is correct",
+                        Configuration::token().expect("Token is not set")
+                    );
+                    let secs = 5;
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
                     // Restart loop, esentially restarting proxy
                     continue;
                 }
@@ -347,7 +344,7 @@ fn check_update_proxy() {
     match updater.update_extended() {
         Ok(status) => match status {
             UpdateStatus::UpToDate => {
-                info!("Starting latest version of DMND-PROXY.");
+                info!("Package is up to date");
             }
             UpdateStatus::Updated(release) => {
                 info!(
