@@ -9,12 +9,9 @@ use roles_logic_sv2::{
     parsers::Mining,
     utils::{GroupId, Mutex},
 };
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
 };
 use sv1_api::{client_to_server::Submit, server_to_client, utils::HexU32Be};
 use tokio::sync::broadcast;
@@ -65,7 +62,6 @@ pub struct Bridge {
     future_jobs: Vec<NewExtendedMiningJob<'static>>,
     last_p_hash: Option<SetNewPrevHash<'static>>,
     target: Arc<Mutex<Vec<u8>>>,
-    valid_job_ids: VecDeque<u32>,
 }
 
 impl Bridge {
@@ -110,7 +106,6 @@ impl Bridge {
             future_jobs: vec![],
             last_p_hash: None,
             target,
-            valid_job_ids: VecDeque::with_capacity(2), // Initialize with capacity for 2 jobs
         })))
     }
 
@@ -271,8 +266,8 @@ impl Bridge {
         let res = self_
             .safe_lock(|s| {
                 let job_id = share.share.job_id.parse::<u32>().expect("Invalid job_id");
-                if !s.valid_job_ids.contains(&job_id) {
-                    warn!("Share rejected: job_id {} not in last two jobs", job_id);
+                if s.channel_factory.job(job_id).is_none() {
+                    warn!("Share rejected: job_id {} not in last three jobs", job_id);
                     return Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob); // rejected
                 }
                 s.channel_factory.set_target(&mut upstream_target);
@@ -428,7 +423,6 @@ impl Bridge {
 
         self_
             .safe_lock(|s| {
-                s.valid_job_ids.clear();
                 s.channel_factory
                     .on_new_prev_hash(sv2_set_new_prev_hash.clone())
             })
@@ -449,7 +443,6 @@ impl Bridge {
         let mut match_a_future_job = false;
         while let Some(job) = future_jobs.pop() {
             if job.job_id == sv2_set_new_prev_hash.job_id {
-                let j_id = job.job_id;
                 // Create the mining.notify to be sent to the Downstream.
                 let notify = super::super::proxy::next_mining_notify::create_notify(
                     sv2_set_new_prev_hash.clone(),
@@ -468,7 +461,6 @@ impl Bridge {
                 self_
                     .safe_lock(|s| {
                         s.last_notify = Some(notify);
-                        s.valid_job_ids.push_back(j_id);
                     })
                     .map_err(|_| Error::BridgeMutexPoisoned)?;
                 break;
@@ -566,7 +558,6 @@ impl Bridge {
                 RolesLogicError::JobIsNotFutureButPrevHashNotPresent,
             ))?;
 
-            let j_id = sv2_new_extended_mining_job.job_id;
             // Create the mining.notify to be sent to the Downstream.
             // We always set to true cause we do not cache old jobs and we can not verify shares
             // for them
@@ -584,10 +575,6 @@ impl Bridge {
             self_
                 .safe_lock(|s| {
                     s.last_notify = Some(notify);
-                    s.valid_job_ids.push_back(j_id);
-                    if s.valid_job_ids.len() > 2 {
-                        s.valid_job_ids.pop_front(); // Remove oldest if more than 2
-                    }
                 })
                 .map_err(|_| Error::BridgeMutexPoisoned)?;
             Ok(())
