@@ -79,13 +79,23 @@ impl Router {
 
     /// Select the best pool for connection
     pub async fn select_pool_connect(&self) -> Option<SocketAddr> {
-        info!("Selecting the best upstream ");
+        info!("Selecting best Pool for connection");
+        if self.pool_addresses.is_empty() {
+            error!("No pool addresses provided");
+            return None;
+        }
+        if self.pool_addresses.len() == 1 {
+            info!(
+                "Only one pool address available, using: {:?}",
+                self.pool_addresses[0]
+            );
+            return Some(self.pool_addresses[0]);
+        }
         if let Some((pool, latency)) = self.select_pool().await {
-            info!("Latency for upstream {:?} is {:?}", pool, latency);
+            info!("Latency for Pool {:?} is {:?}", pool, latency);
             self.latency_tx.send_replace(Some(latency)); // update latency
             Some(pool)
         } else {
-            //info!("No available pool");
             None
         }
     }
@@ -147,7 +157,7 @@ impl Router {
         };
         self.current_pool = Some(pool);
 
-        info!("Upstream {:?} selected", pool);
+        info!("Trying to connect to Pool {:?}", pool);
 
         match minin_pool_connection::connect_pool(
             pool,
@@ -166,6 +176,10 @@ impl Router {
                         error!("Pool address Mutex corrupt");
                         crate::proxy_state::ProxyState::update_inconsistency(Some(1));
                     });
+                info!(
+                    "Completed Handshake And SetupConnection with Pool at {:?}",
+                    pool
+                );
 
                 Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
             }

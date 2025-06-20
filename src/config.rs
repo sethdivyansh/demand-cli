@@ -5,7 +5,7 @@ use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{HashUnit, DEFAULT_SV1_HASHPOWER};
 lazy_static! {
@@ -190,6 +190,7 @@ impl Configuration {
             .token
             .or(config.token)
             .or_else(|| std::env::var("TOKEN").ok());
+        debug!("User Token: {:?}", token);
 
         let tp_address = args
             .tp_address

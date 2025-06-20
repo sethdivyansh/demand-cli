@@ -18,13 +18,20 @@ use tracing::{error, info, warn};
 pub fn start_listen_for_downstream(
     downstreams: Sender<(Sender<String>, Receiver<String>, IpAddr)>,
 ) -> AbortOnDrop {
-    info!("Starting downstream listner");
     tokio::task::spawn(async move {
         let down_addr: String = crate::SV1_DOWN_LISTEN_ADDR.to_string();
         let downstream_addr: SocketAddr = down_addr.parse().expect("Invalid listen address");
+        info!(
+            "Trying to bind to address {} for downstream(miner) connections",
+            downstream_addr
+        );
         let downstream_listener = TcpListener::bind(downstream_addr)
             .await
             .expect("impossible to bind downstream");
+        info!(
+            "Listening for downstream connections on {:?}",
+            downstream_addr
+        );
         while let Ok((stream, addr)) = downstream_listener.accept().await {
             info!("Try to connect {:#?}", addr);
             Downstream::initialize(
