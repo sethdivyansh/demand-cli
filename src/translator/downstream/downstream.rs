@@ -437,8 +437,8 @@ impl IsServer<'static> for Downstream {
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
         info!(
-            "Handling mining.submit for for downstream with connection id {} and job_id {}",
-            self.connection_id, request.job_id
+            "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
+            request.id, request.user_name, request.job_id, request.nonce
         );
 
         // check first job received
