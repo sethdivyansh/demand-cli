@@ -28,13 +28,14 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 
-use std::{collections::VecDeque, net::IpAddr, sync::Arc};
+use std::{collections::{hash_map::Entry, HashMap, VecDeque}, net::IpAddr, sync::Arc};
 use sv1_api::{
     client_to_server, json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be},
     IsServer,
 };
 use tracing::{error, info, warn};
+use rand::Rng;
 
 #[derive(Debug, Clone)]
 pub struct DownstreamDifficultyConfig {
@@ -113,6 +114,7 @@ pub struct Downstream {
     pub last_call_to_update_hr: u128,
     pub(super) recent_notifies: VecDeque<server_to_client::Notify<'static>>,
     pub(super) stats_sender: StatsSender,
+    pub job_ids: JobIds,
 }
 
 impl Downstream {
@@ -197,6 +199,7 @@ impl Downstream {
             last_call_to_update_hr: 0,
             recent_notifies: recent_notifies.clone(),
             stats_sender,
+            job_ids: JobIds::new(),
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -443,6 +446,20 @@ impl IsServer<'static> for Downstream {
             self.stats_sender.update_rejected_shares(self.connection_id);
             return false;
         }
+        let mut request = request.clone();
+        let job_id_as_number = request.job_id.parse::<u32>();
+        if job_id_as_number.is_err() {
+            error!("Share rejected: can not convert v1 job id to number. v1 id: {}", request.job_id);
+            self.stats_sender.update_rejected_shares(self.connection_id);
+            return false;
+        }
+        let v2_id = self.job_ids.get_v2(job_id_as_number.unwrap());
+        if v2_id.is_none() {
+            error!("Share rejected: can not convert from v1 to v2 job id. v1 id: {}", request.job_id);
+            self.stats_sender.update_rejected_shares(self.connection_id);
+            return false;
+        }
+        request.job_id = v2_id.unwrap();
         //check allowed to send shares
         match allow_submit_share() {
             Ok(true) => {
@@ -455,7 +472,7 @@ impl IsServer<'static> for Downstream {
 
                 //check share is valid
                 if let Some(met_difficulty) = validate_share(
-                    request,
+                    &request,
                     &self.recent_notifies,
                     &self.difficulty_mgmt.current_difficulties,
                     self.extranonce1.clone(),
@@ -577,6 +594,92 @@ impl IsDownstream for Downstream {
         todo!()
     }
 }
+
+#[derive(Debug)]
+pub struct JobIds {
+    v1_to_v2: HashMap<u32,u32>,
+    v2_to_v1: HashMap<u32,Vec<u32>>,
+    last_v2s: CircularBuffer<u32,3>,
+}
+
+impl JobIds {
+    pub fn new_v1(&mut self, v2_id: u32) -> u32 {
+        let mut v1_id = rand::thread_rng().gen();
+        while self.v1_to_v2.contains_key(&v1_id) {
+            v1_id = rand::thread_rng().gen();
+        }
+        match self.v2_to_v1.entry(v2_id) {
+            Entry::Occupied(mut v) => {
+                v.get_mut().push(v1_id);
+            }
+            Entry::Vacant(v) => {
+                v.insert(vec![v1_id]);
+                if let Some(first) = self.last_v2s.push_back(v2_id) {
+                    self.remove_v2(first);
+                }
+            }
+        }
+        self.v1_to_v2.insert(v1_id, v2_id);
+        v1_id
+    }
+    fn remove_v2(&mut self, v2_id: u32) {
+        if let Some(v1_ids) = self.v2_to_v1.remove(&v2_id) {
+            for v1_id in v1_ids {
+                self.v1_to_v2.remove(&v1_id);
+            }
+        }
+    }
+    fn get_v2(&self, v1_id: u32) -> Option<String> {
+        self.v1_to_v2.get(&v1_id).cloned().map(|v| v.to_string())
+    }
+    pub fn new() -> Self {
+        Self {
+            v1_to_v2: HashMap::new(),
+            v2_to_v1: HashMap::new(),
+            last_v2s: CircularBuffer::new(),
+        }
+    }
+}
+
+impl Default for JobIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
+#[derive(Debug)]
+struct CircularBuffer<T, const N: usize> {
+    buffer: [Option<T>; N],
+    len: usize,
+    start: usize,
+}
+
+impl<T, const N: usize> CircularBuffer<T, N> {
+    pub fn new() -> Self {
+        Self {
+            buffer: std::array::from_fn(|_| None),
+            len: 0,
+            start: 0,
+        }
+    }
+
+    pub fn push_back(&mut self, value: T) -> Option<T> {
+        let end = (self.start + self.len) % N;
+
+        if self.len < N {
+            self.buffer[end] = Some(value);
+            self.len += 1;
+            None
+        } else {
+            let evicted = self.buffer[self.start].take();
+            self.buffer[self.start] = Some(value);
+            self.start = (self.start + 1) % N;
+            evicted
+        }
+    }
+}
+
 
 //#[cfg(test)]
 //mod tests {

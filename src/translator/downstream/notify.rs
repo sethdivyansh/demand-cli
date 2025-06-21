@@ -70,6 +70,8 @@ pub async fn start_notify(
                             break;
                         }
                     };
+                    let id = downstream.safe_lock(|d| d.job_ids.new_v1(sv1_mining_notify_msg.job_id.parse::<u32>().unwrap())).unwrap();
+                    sv1_mining_notify_msg.job_id = id.to_string();
                     apply_mask(mask, &mut sv1_mining_notify_msg);
                     let message: json_rpc::Message = sv1_mining_notify_msg.into();
                     Downstream::send_message_downstream(downstream.clone(), message).await;
@@ -116,7 +118,8 @@ pub async fn start_notify(
                             );
                             break;
                         }
-
+                        let id = downstream.safe_lock(|d| d.job_ids.new_v1(sv1_mining_notify_msg.job_id.parse::<u32>().unwrap())).unwrap();
+                        sv1_mining_notify_msg.job_id = id.to_string();
                         apply_mask(mask.clone(), &mut sv1_mining_notify_msg);
                         debug!(
                             "Sending Job {:?} to miner. Difficulty: {:?}",
