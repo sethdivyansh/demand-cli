@@ -30,7 +30,6 @@ import {
 import * as React from 'react';
 
 import { useDebouncedCallback } from '@/hooks/use-debounced-callback';
-import { getSortingStateParser } from '@/lib/parsers';
 import type { ExtendedColumnSort } from '@/types/data-table';
 
 const PAGE_KEY = 'page';
@@ -70,7 +69,7 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
     history = 'replace',
     debounceMs = DEBOUNCE_MS,
     throttleMs = THROTTLE_MS,
-    clearOnDefault = false,
+    clearOnDefault = true,
     enableAdvancedFilter = false,
     scroll = false,
     shallow = true,
@@ -109,19 +108,29 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
 
   const [page, setPage] = useQueryState(
     PAGE_KEY,
-    parseAsInteger.withOptions(queryStateOptions).withDefault(1)
+    parseAsInteger
+      .withOptions({
+        ...queryStateOptions,
+        clearOnDefault: true
+      })
+      .withDefault(1)
   );
+
+  const defaultPerPage = initialState?.pagination?.pageSize ?? 10;
   const [perPage, setPerPage] = useQueryState(
     PER_PAGE_KEY,
     parseAsInteger
-      .withOptions(queryStateOptions)
-      .withDefault(initialState?.pagination?.pageSize ?? 10)
+      .withOptions({
+        ...queryStateOptions,
+        clearOnDefault: true
+      })
+      .withDefault(defaultPerPage)
   );
 
   const pagination: PaginationState = React.useMemo(() => {
     return {
-      pageIndex: page - 1, // zero-based index -> one-based index
-      pageSize: perPage
+      pageIndex: Math.max(0, page - 1),
+      pageSize: Math.max(1, perPage)
     };
   }, [page, perPage]);
 
@@ -129,11 +138,11 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
     (updaterOrValue: Updater<PaginationState>) => {
       if (typeof updaterOrValue === 'function') {
         const newPagination = updaterOrValue(pagination);
-        void setPage(newPagination.pageIndex + 1);
-        void setPerPage(newPagination.pageSize);
+        void setPage(Math.max(1, newPagination.pageIndex + 1));
+        void setPerPage(Math.max(1, newPagination.pageSize));
       } else {
-        void setPage(updaterOrValue.pageIndex + 1);
-        void setPerPage(updaterOrValue.pageSize);
+        void setPage(Math.max(1, updaterOrValue.pageIndex + 1));
+        void setPerPage(Math.max(1, updaterOrValue.pageSize));
       }
     },
     [pagination, setPage, setPerPage]
@@ -145,11 +154,65 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
     );
   }, [columns]);
 
-  const [sorting, setSorting] = useQueryState(
+  const [sortingFromUrl, setSortingFromUrl] = useQueryState(
     SORT_KEY,
-    getSortingStateParser<TData>(columnIds)
-      .withOptions(queryStateOptions)
-      .withDefault(initialState?.sorting ?? [])
+    parseAsString
+      .withOptions({
+        ...queryStateOptions,
+        clearOnDefault: true
+      })
+      .withDefault('')
+  );
+
+  const sorting = React.useMemo((): ExtendedColumnSort<TData>[] => {
+    if (!sortingFromUrl || sortingFromUrl.trim() === '') {
+      return initialState?.sorting ?? [];
+    }
+
+    try {
+      const decoded = decodeURIComponent(sortingFromUrl);
+      const parsed = JSON.parse(decoded);
+
+      if (!Array.isArray(parsed)) return initialState?.sorting ?? [];
+
+      const validSorts = parsed.filter(
+        (sort: any) =>
+          sort &&
+          typeof sort === 'object' &&
+          typeof sort.id === 'string' &&
+          columnIds.has(sort.id) &&
+          typeof sort.desc === 'boolean'
+      );
+
+      return validSorts.length > 0 ? validSorts : (initialState?.sorting ?? []);
+    } catch {
+      return initialState?.sorting ?? [];
+    }
+  }, [sortingFromUrl, columnIds, initialState?.sorting]);
+
+  const setSorting = React.useCallback(
+    (newSorting: ExtendedColumnSort<TData>[]) => {
+      if (!Array.isArray(newSorting) || newSorting.length === 0) {
+        void setSortingFromUrl('');
+        return;
+      }
+
+      const validSorts = newSorting.filter(
+        (sort) =>
+          sort &&
+          typeof sort.id === 'string' &&
+          columnIds.has(sort.id) &&
+          typeof sort.desc === 'boolean'
+      );
+
+      if (validSorts.length === 0) {
+        void setSortingFromUrl('');
+      } else {
+        const serialized = encodeURIComponent(JSON.stringify(validSorts));
+        void setSortingFromUrl(serialized);
+      }
+    },
+    [setSortingFromUrl, columnIds]
   );
 
   const onSortingChange = React.useCallback(
@@ -176,13 +239,20 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
     return filterableColumns.reduce<
       Record<string, Parser<string> | Parser<string[]>>
     >((acc, column) => {
+      const columnId = column.id ?? '';
       if (column.meta?.options) {
-        acc[column.id ?? ''] = parseAsArrayOf(
+        acc[columnId] = parseAsArrayOf(
           parseAsString,
           ARRAY_SEPARATOR
-        ).withOptions(queryStateOptions);
+        ).withOptions({
+          ...queryStateOptions,
+          clearOnDefault: true
+        });
       } else {
-        acc[column.id ?? ''] = parseAsString.withOptions(queryStateOptions);
+        acc[columnId] = parseAsString.withOptions({
+          ...queryStateOptions,
+          clearOnDefault: true
+        });
       }
       return acc;
     }, {});
@@ -192,7 +262,9 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
 
   const debouncedSetFilterValues = useDebouncedCallback(
     (values: typeof filterValues) => {
-      void setPage(1);
+      if (page !== 1) {
+        void setPage(1);
+      }
       void setFilterValues(values);
     },
     debounceMs
@@ -203,17 +275,19 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
 
     return Object.entries(filterValues).reduce<ColumnFiltersState>(
       (filters, [key, value]) => {
-        if (value !== null) {
+        if (value !== null && value !== undefined) {
           const processedValue = Array.isArray(value)
-            ? value
+            ? value.filter(Boolean)
             : typeof value === 'string' && /[^a-zA-Z0-9]/.test(value)
               ? value.split(/[^a-zA-Z0-9]+/).filter(Boolean)
-              : [value];
+              : [value].filter(Boolean);
 
-          filters.push({
-            id: key,
-            value: processedValue
-          });
+          if (processedValue.length > 0) {
+            filters.push({
+              id: key,
+              value: processedValue
+            });
+          }
         }
         return filters;
       },
@@ -238,7 +312,12 @@ export function useDataTable<TData>(props: UseDataTableProps<TData>) {
           Record<string, string | string[] | null>
         >((acc, filter) => {
           if (filterableColumns.find((column) => column.id === filter.id)) {
-            acc[filter.id] = filter.value as string | string[];
+            const value = filter.value as string | string[];
+            if (Array.isArray(value) ? value.length > 0 : value) {
+              acc[filter.id] = value;
+            } else {
+              acc[filter.id] = null;
+            }
           }
           return acc;
         }, {});
