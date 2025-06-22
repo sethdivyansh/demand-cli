@@ -111,12 +111,10 @@ impl Downstream {
 
         // Get the last notify
         let recent_notify = self_
-            .safe_lock(|d| d.recent_notifies.back().cloned())
+            .safe_lock(|d| d.recent_jobs.clone_last())
             .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)?;
 
-        if let Some(mut notify) = recent_notify {
-            let id = self_.safe_lock(|d| d.job_ids.new_v1(notify.job_id.parse::<u32>().unwrap())).unwrap();
-            notify.job_id = id.to_string();
+        if let Some(notify) = recent_notify {
             Downstream::send_message_downstream(self_.clone(), notify.into()).await;
         }
 
