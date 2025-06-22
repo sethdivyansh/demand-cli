@@ -1,7 +1,7 @@
-import Providers from '@/components/layout/providers';
 import { Toaster } from '@/components/ui/sonner';
 import { fontVariables } from '@/lib/font';
 import ThemeProvider from '@/components/layout/ThemeToggle/theme-provider';
+import { ActiveThemeProvider } from '@/components/active-theme';
 import { cn } from '@/lib/utils';
 import type { Metadata, Viewport } from 'next';
 import { cookies } from 'next/headers';
@@ -65,10 +65,10 @@ export default async function RootLayout({
             disableTransitionOnChange
             enableColorScheme
           >
-            <Providers activeThemeValue={activeThemeValue as string}>
-              <Toaster />
+            <ActiveThemeProvider initialTheme={activeThemeValue}>
               {children}
-            </Providers>
+              <Toaster />
+            </ActiveThemeProvider>
           </ThemeProvider>
         </NuqsAdapter>
       </body>
