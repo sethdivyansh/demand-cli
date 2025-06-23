@@ -26,6 +26,17 @@ export function formatBytes(
   }`;
 }
 
+export function formatHashrate(hashrate: number) {
+  if (hashrate >= 1000000000000) {
+    return `${(hashrate / 1000000000000).toFixed(2)} TH/s`;
+  } else if (hashrate >= 1000000000) {
+    return `${(hashrate / 1000000000).toFixed(2)} GH/s`;
+  } else if (hashrate >= 1000000) {
+    return `${(hashrate / 1000000).toFixed(2)} MH/s`;
+  }
+  return `${hashrate.toFixed(2)} H/s`;
+}
+
 export function parseMempoolTransaction(tx: any): MempoolTransaction {
   return {
     txid: tx.txid,

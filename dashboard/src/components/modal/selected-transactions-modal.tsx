@@ -16,7 +16,7 @@ import {
   Table as ReactTable
 } from '@tanstack/react-table';
 import type { MempoolTransaction } from '@/types/mempool-transaction';
-import { selectedTransactionColumns } from './transaction-columns';
+import { selectedTransactionColumns } from '../../features/overview/components/transaction-columns';
 
 interface SelectedTransactionsModalProps {
   isOpen: boolean;

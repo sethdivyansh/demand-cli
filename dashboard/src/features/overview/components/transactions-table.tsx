@@ -7,7 +7,7 @@ import { DataTableSortList } from '@/components/ui/table/data-table-sort-list';
 import { useDataTable } from '@/hooks/use-data-table';
 import type { MempoolTransaction } from '@/types/mempool-transaction';
 import { transactionColumns } from './transaction-columns';
-import { SelectedTransactionsModal } from './selected-transactions-modal';
+import { SelectedTransactionsModal } from '../../../components/modal/selected-transactions-modal';
 import React from 'react';
 
 interface Props {
