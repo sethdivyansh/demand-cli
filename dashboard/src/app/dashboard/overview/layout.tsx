@@ -34,10 +34,11 @@ import {
   TooltipContent,
   TooltipTrigger
 } from '@/components/ui/tooltip';
+import { Skeleton } from '@/components/ui/skeleton';
 
 export default function OverViewLayout({
-  pie_stats,
-  area_stats,
+  // pie_stats,
+  // area_stats,
   mempool_transactions
 }: {
   sales: React.ReactNode;
@@ -136,9 +137,7 @@ export default function OverViewLayout({
               </CardDescription>
               <CardTitle className='text-xl font-semibold tabular-nums @[250px]/card:text-2xl'>
                 {poolLoading ? (
-                  <div className='animate-pulse'>
-                    <div className='h-5 w-3/4 rounded bg-gray-200'></div>
-                  </div>
+                  <Skeleton className='h-5 w-3/4' />
                 ) : poolError ? (
                   `Error: ${poolError}`
                 ) : poolInfo?.address ? (
@@ -169,9 +168,7 @@ export default function OverViewLayout({
               </CardDescription>
               <CardTitle className='text-2xl font-semibold tabular-nums @[250px]/card:text-3xl'>
                 {aggregateLoading ? (
-                  <div className='animate-pulse'>
-                    <div className='h-8 w-16 rounded bg-gray-200'></div>
-                  </div>
+                  <Skeleton className='h-5 w-3/4' />
                 ) : aggregateError ? (
                   'N/A'
                 ) : (
@@ -201,9 +198,7 @@ export default function OverViewLayout({
               </CardDescription>
               <CardTitle className='text-2xl font-semibold tabular-nums @[250px]/card:text-3xl'>
                 {aggregateLoading ? (
-                  <div className='animate-pulse'>
-                    <div className='h-7 w-20 rounded bg-gray-200'></div>
-                  </div>
+                  <Skeleton className='h-5 w-3/4' />
                 ) : aggregateError ? (
                   'N/A'
                 ) : aggregateStats?.total_hashrate ? (
@@ -237,9 +232,7 @@ export default function OverViewLayout({
               </CardDescription>
               <CardTitle className='text-2xl font-semibold tabular-nums @[250px]/card:text-3xl'>
                 {systemLoading ? (
-                  <div className='animate-pulse'>
-                    <div className='h-7 w-16 rounded bg-gray-200'></div>
-                  </div>
+                  <Skeleton className='h-5 w-3/4' />
                 ) : systemError ? (
                   'N/A'
                 ) : systemStats?.cpu_usage ? (
@@ -277,8 +270,8 @@ export default function OverViewLayout({
 
         <div className='grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-7'>
           <div className='col-span-7'>{mempool_transactions}</div>
-          <div className='col-span-4'>{area_stats}</div>
-          <div className='col-span-4 md:col-span-3'>{pie_stats}</div>
+          {/* <div className='col-span-4'>{area_stats}</div> */}
+          {/* <div className='col-span-4 md:col-span-3'>{pie_stats}</div> */}
         </div>
 
         <StatsModal

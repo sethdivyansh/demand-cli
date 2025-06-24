@@ -16,7 +16,8 @@ import {
   Table as ReactTable
 } from '@tanstack/react-table';
 import type { MempoolTransaction } from '@/types/mempool-transaction';
-import { selectedTransactionColumns } from '../../features/overview/components/transaction-columns';
+import { selectedTransactionColumns } from '@/features/overview/components/transaction-columns';
+import { TransactionSummaryModal } from './transaction-summary-modal';
 
 interface SelectedTransactionsModalProps {
   isOpen: boolean;
@@ -34,6 +35,7 @@ export function SelectedTransactionsModal({
   const [pageIndex, setPageIndex] = React.useState(0);
   const [pageSize, setPageSize] = React.useState(10);
   const [sorting, setSorting] = React.useState<SortingState>([]);
+  const [isSummaryModalOpen, setIsSummaryModalOpen] = React.useState(false);
 
   const customizedColumns = React.useMemo<ColumnDef<MempoolTransaction>[]>(
     () =>
@@ -94,20 +96,35 @@ export function SelectedTransactionsModal({
             <DataTableToolbar table={table} />
             <DataTableSortList table={table} />
             {selectedData.length > 0 && (
-              <Button
-                variant='destructive'
-                size='sm'
-                onClick={() => {
-                  parentTable.toggleAllRowsSelected(false);
-                  setTimeout(() => handleModal(false), 800);
-                }}
-              >
-                Deselect All
-              </Button>
+              <>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() => setIsSummaryModalOpen(true)}
+                >
+                  View Summary
+                </Button>
+                <Button
+                  variant='destructive'
+                  size='sm'
+                  onClick={() => {
+                    parentTable.toggleAllRowsSelected(false);
+                    setTimeout(() => handleModal(false), 800);
+                  }}
+                >
+                  Deselect All
+                </Button>
+              </>
             )}
           </div>
         </DataTable>
       </div>
+
+      <TransactionSummaryModal
+        isOpen={isSummaryModalOpen}
+        selectedData={selectedData}
+        handleModal={setIsSummaryModalOpen}
+      />
     </Modal>
   );
 }

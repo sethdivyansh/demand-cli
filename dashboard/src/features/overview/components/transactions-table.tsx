@@ -9,6 +9,7 @@ import type { MempoolTransaction } from '@/types/mempool-transaction';
 import { transactionColumns } from './transaction-columns';
 import { SelectedTransactionsModal } from '../../../components/modal/selected-transactions-modal';
 import React from 'react';
+import { TransactionSummaryModal } from '@/components/modal/transaction-summary-modal';
 
 interface Props {
   data: MempoolTransaction[];
@@ -17,7 +18,8 @@ interface Props {
 }
 
 export function TransactionsTable({ data, isFetching, onToggle }: Props) {
-  const [isModalOpen, setIsModalOpen] = React.useState(false);
+  const [isSelectedModalOpen, setIsSelectedModalOpen] = React.useState(false);
+  const [isSummaryModalOpen, setIsSummaryModalOpen] = React.useState(false);
 
   const { table } = useDataTable<MempoolTransaction>({
     data,
@@ -31,12 +33,12 @@ export function TransactionsTable({ data, isFetching, onToggle }: Props) {
     [selectedRows]
   );
 
-  const handleModal = (open: boolean) => {
+  const handleSelectedModal = (open: boolean) => {
     if (open) {
-      setIsModalOpen(true);
+      setIsSelectedModalOpen(true);
       if (isFetching) onToggle();
     } else {
-      setIsModalOpen(false);
+      setIsSelectedModalOpen(false);
       if (!isFetching) onToggle();
     }
   };
@@ -51,7 +53,14 @@ export function TransactionsTable({ data, isFetching, onToggle }: Props) {
               <Button
                 variant='outline'
                 size='sm'
-                onClick={() => handleModal(true)}
+                onClick={() => setIsSummaryModalOpen(true)}
+              >
+                Summary
+              </Button>
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() => handleSelectedModal(true)}
                 disabled={selectedRows.length === 0}
               >
                 View Selected ({selectedRows.length})
@@ -68,11 +77,16 @@ export function TransactionsTable({ data, isFetching, onToggle }: Props) {
           </DataTable>
         </div>
       </Card>
+      <TransactionSummaryModal
+        isOpen={isSummaryModalOpen}
+        selectedData={selectedData}
+        handleModal={setIsSummaryModalOpen}
+      />
       <SelectedTransactionsModal
-        isOpen={isModalOpen}
+        isOpen={isSelectedModalOpen}
         selectedData={selectedData}
         parentTable={table}
-        handleModal={handleModal}
+        handleModal={handleSelectedModal}
       />
     </>
   );
