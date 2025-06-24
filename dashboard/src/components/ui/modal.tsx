@@ -6,6 +6,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 
 interface ModalProps {
   title: string;
@@ -24,6 +25,7 @@ interface ModalProps {
     | '5xl'
     | '6xl'
     | '7xl';
+  className?: string;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -32,7 +34,8 @@ export const Modal: React.FC<ModalProps> = ({
   isOpen,
   onClose,
   children,
-  size = 'lg'
+  size = 'lg',
+  className = ''
 }) => {
   const onChange = (open: boolean) => {
     if (!open) {
@@ -55,9 +58,7 @@ export const Modal: React.FC<ModalProps> = ({
 
   return (
     <Dialog open={isOpen} onOpenChange={onChange}>
-      <DialogContent
-        className={`${sizeClasses[size]} max-h-[90vh] overflow-y-auto`}
-      >
+      <DialogContent className={cn(sizeClasses[size], className)}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>

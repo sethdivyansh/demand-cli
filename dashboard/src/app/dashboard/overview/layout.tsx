@@ -28,6 +28,12 @@ import {
   IconDeviceDesktop
 } from '@tabler/icons-react';
 import React from 'react';
+import { formatHashrate } from '@/lib/utils';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from '@/components/ui/tooltip';
 
 export default function OverViewLayout({
   pie_stats,
@@ -83,36 +89,41 @@ export default function OverViewLayout({
               <IconChartBar className='h-4 w-4' />
               Detailed Stats
             </Button>
-            <Badge
-              variant={
-                healthLoading
-                  ? 'secondary'
-                  : healthError
-                    ? 'destructive'
-                    : 'default'
-              }
-              className='flex cursor-default items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium shadow-sm transition-all hover:shadow-md'
-              title={`Last Updated: ${
-                health?.timestamp
-                  ? new Date(health.timestamp).toLocaleString()
-                  : 'Unknown'
-              }`}
-            >
-              <span
-                className={`h-2.5 w-2.5 rounded-full ${
-                  healthLoading
-                    ? 'animate-pulse bg-gray-400'
+            <Tooltip>
+              <TooltipTrigger>
+                <Badge
+                  variant={
+                    healthLoading
+                      ? 'secondary'
+                      : healthError
+                        ? 'destructive'
+                        : 'default'
+                  }
+                  className='flex items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium shadow-sm transition-all hover:shadow-md'
+                >
+                  <span
+                    className={`h-2.5 w-2.5 rounded-full ${
+                      healthLoading
+                        ? 'animate-pulse bg-gray-400'
+                        : healthError
+                          ? 'animate-pulse bg-red-500'
+                          : 'bg-green-500'
+                    }`}
+                  />
+                  {healthLoading
+                    ? 'Connecting...'
                     : healthError
-                      ? 'animate-pulse bg-red-500'
-                      : 'bg-green-500'
-                }`}
-              />
-              {healthLoading
-                ? 'Connecting...'
-                : healthError
-                  ? `${healthError}`
-                  : health?.status}
-            </Badge>
+                      ? `${healthError}`
+                      : health?.status}
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent>
+                Last Updated:
+                {health?.timestamp
+                  ? new Date(health.timestamp).toLocaleString()
+                  : 'Unknown'}
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
@@ -196,7 +207,7 @@ export default function OverViewLayout({
                 ) : aggregateError ? (
                   'N/A'
                 ) : aggregateStats?.total_hashrate ? (
-                  `${(aggregateStats.total_hashrate / 1000000000000).toFixed(2)} TH/s`
+                  formatHashrate(aggregateStats.total_hashrate, 2)
                 ) : (
                   '0 TH/s'
                 )}

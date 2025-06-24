@@ -26,15 +26,15 @@ export function formatBytes(
   }`;
 }
 
-export function formatHashrate(hashrate: number) {
+export function formatHashrate(hashrate: number, decimals: number = 2) {
   if (hashrate >= 1000000000000) {
-    return `${(hashrate / 1000000000000).toFixed(2)} TH/s`;
+    return `${(hashrate / 1000000000000).toFixed(decimals)} TH/s`;
   } else if (hashrate >= 1000000000) {
-    return `${(hashrate / 1000000000).toFixed(2)} GH/s`;
+    return `${(hashrate / 1000000000).toFixed(decimals)} GH/s`;
   } else if (hashrate >= 1000000) {
-    return `${(hashrate / 1000000).toFixed(2)} MH/s`;
+    return `${(hashrate / 1000000).toFixed(decimals)} MH/s`;
   }
-  return `${hashrate.toFixed(2)} H/s`;
+  return `${hashrate.toFixed(decimals)} H/s`;
 }
 
 export function parseMempoolTransaction(tx: any): MempoolTransaction {

@@ -86,7 +86,7 @@ export function SelectedTransactionsModal({
       description='Review the selected transactions'
       isOpen={isOpen}
       onClose={() => handleModal(false)}
-      className='w-full max-w-6xl overflow-scroll sm:max-w-6xl'
+      size='6xl'
     >
       <div className='max-h-[75vh] overflow-auto'>
         <DataTable table={table}>
