@@ -1,8 +1,11 @@
+'use client';
+
 import { parseMempoolTransaction } from '@/lib/utils';
 import { MempoolTransaction } from '@/types/mempool-transaction';
 import React from 'react';
 import axios from 'axios';
 import ReconnectingWebSocket from 'reconnecting-websocket';
+import { toast } from 'sonner';
 
 export function useMempoolTransactions() {
   const [transactions, setTransactions] = React.useState<MempoolTransaction[]>(
@@ -75,7 +78,19 @@ export function useMempoolTransactions() {
     );
     wsNewBlockRef.current = ws;
     ws.onmessage = (e) => {
-      const { txids } = JSON.parse(e.data);
+      const { block_hash, txids } = JSON.parse(e.data);
+      const shortHash = block_hash.slice(0, 8) + '...';
+
+      toast.info(`New Block ${shortHash} Mined`, {
+        description: `Removing ${txids.length - 1} confirmed transactions`, // Subtracting 1 because the block itself is included in the txids list but is not a transaction
+        duration: 4000,
+        action: {
+          label: 'View Block',
+          onClick: () =>
+            window.open(`https://mempool.space/block/${block_hash}`, '_blank')
+        }
+      });
+
       const toRemove = new Set(txids);
       setTransactions((tx) => tx.filter((t) => !toRemove.has(t.txid)));
       setPausedTx((p) => p.filter((t) => !toRemove.has(t.txid)));
