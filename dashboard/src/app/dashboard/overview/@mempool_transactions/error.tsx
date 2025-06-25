@@ -35,7 +35,8 @@ export default function StatsError({ error, reset }: StatsErrorProps) {
             <IconAlertCircle className='h-4 w-4' />
             <AlertTitle>Error</AlertTitle>
             <AlertDescription className='mt-2'>
-              Failed to Transactions: {error.message}
+              Failed to load transactions:{' '}
+              {error.message || 'An unexpected error occurred.'}
             </AlertDescription>
           </Alert>
         </div>

@@ -1,11 +1,11 @@
 'use client';
 
-import { parseMempoolTransaction } from '@/lib/utils';
 import { MempoolTransaction } from '@/types/mempool-transaction';
 import React from 'react';
 import axios from 'axios';
 import ReconnectingWebSocket from 'reconnecting-websocket';
 import { toast } from 'sonner';
+import { parseMempoolTransaction } from '@/lib/parsers';
 
 export function useMempoolTransactions() {
   const [transactions, setTransactions] = React.useState<MempoolTransaction[]>(

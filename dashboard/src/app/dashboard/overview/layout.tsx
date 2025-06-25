@@ -28,22 +28,17 @@ import {
   IconDeviceDesktop
 } from '@tabler/icons-react';
 import React from 'react';
-import { formatHashrate } from '@/lib/utils';
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger
 } from '@/components/ui/tooltip';
 import { Skeleton } from '@/components/ui/skeleton';
+import { formatDateTime, formatHashrate } from '@/lib/format';
 
 export default function OverViewLayout({
-  // pie_stats,
-  // area_stats,
   mempool_transactions
 }: {
-  sales: React.ReactNode;
-  pie_stats: React.ReactNode;
-  area_stats: React.ReactNode;
   mempool_transactions: React.ReactNode;
 }) {
   const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
@@ -121,7 +116,7 @@ export default function OverViewLayout({
               <TooltipContent>
                 Last Updated:
                 {health?.timestamp
-                  ? new Date(health.timestamp).toLocaleString()
+                  ? formatDateTime(health.timestamp)
                   : 'Unknown'}
               </TooltipContent>
             </Tooltip>
@@ -270,8 +265,6 @@ export default function OverViewLayout({
 
         <div className='grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-7'>
           <div className='col-span-7'>{mempool_transactions}</div>
-          {/* <div className='col-span-4'>{area_stats}</div> */}
-          {/* <div className='col-span-4 md:col-span-3'>{pie_stats}</div> */}
         </div>
 
         <StatsModal

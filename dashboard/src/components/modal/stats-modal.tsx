@@ -29,8 +29,8 @@ import {
   IconTrendingUp,
   IconTrendingDown
 } from '@tabler/icons-react';
-import { formatHashrate } from '@/lib/utils';
 import { Progress } from '../ui/progress';
+import { formatDateTime, formatHashrate } from '@/lib/format';
 
 interface StatsModalProps {
   isOpen: boolean;
@@ -92,8 +92,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                       </Badge>
                       {health?.timestamp && (
                         <span className='text-muted-foreground text-sm'>
-                          Last updated:{' '}
-                          {new Date(health.timestamp).toLocaleString()}
+                          Last updated: {formatDateTime(health.timestamp)}
                         </span>
                       )}
                     </div>

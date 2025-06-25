@@ -7,6 +7,7 @@ import type {
   ExtendedColumnFilter,
   ExtendedColumnSort
 } from '@/types/data-table';
+import { MempoolTransaction } from '@/types/mempool-transaction';
 
 const sortingItemSchema = z.object({
   id: z.string(),
@@ -96,4 +97,30 @@ export const getFiltersStateParser = <TData>(
           filter.operator === b[index]?.operator
       )
   });
+};
+
+export const parseMempoolTransaction = (tx: any): MempoolTransaction => {
+  return {
+    txid: tx.txid,
+    vsize: tx.vsize,
+    weight: tx.weight,
+    time: tx.time,
+    height: tx.height,
+    descendant_count: tx.descendant_count,
+    descendant_size: tx.descendant_size,
+    ancestor_count: tx.ancestor_count,
+    ancestor_size: tx.ancestor_size,
+    wtxid: tx.wtxid || tx.txid,
+    fees: {
+      base: tx.fees.base * 1e8,
+      modified: tx.fees.modified * 1e8,
+      ancestor: tx.fees.ancestor * 1e8,
+      descendant: tx.fees.descendant * 1e8
+    },
+    feeRate: (tx.fees.base * 1e8) / tx.vsize,
+    depends: tx.depends || [],
+    spent_by: tx.spent_by || [],
+    bip125_replaceable: tx.bip125_replaceable,
+    unbroadcast: tx.unbroadcast
+  };
 };

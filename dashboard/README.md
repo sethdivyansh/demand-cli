@@ -1,115 +1,160 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://user-images.githubusercontent.com/9113740/201498864-2a900c64-d88f-4ed4-b5cf-770bcb57e1f5.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://user-images.githubusercontent.com/9113740/201498152-b171abb8-9225-487a-821c-6ff49ee48579.png">
-</picture>
+# DMND Transaction Selection Dashboard
 
-<div align="center"><strong>Next.js Admin Dashboard Starter Template With Shadcn-ui</strong></div>
-<div align="center">Built with the Next.js 15 App Router</div>
-<br />
-<div align="center">
-<a href="https://dub.sh/shadcn-dashboard">View Demo</a>
-<span>
-</div>
+**Stratum V2 Job Declaration UI for Bitcoin Miners**
+
+![Dashboard Screenshot](./public/assets/dashboard-screenshot.png)
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Features](#features)
+3. [Tech Stack](#tech-stack)
+4. [Getting Started](#getting-started)
+5. [Usage](#usage)
+6. [Architecture](#architecture)
+7. [Contributing](#contributing)
+8. [License](#license)
+
+---
 
 ## Overview
 
-This is a starter template using the following stack:
+The DMND Transaction Selection Dashboard is a web-based interface that connects to the DMND proxy via Stratum V2. It enables miners to:
 
-- Framework - [Next.js 15](https://nextjs.org/13)
-- Language - [TypeScript](https://www.typescriptlang.org)
-- Auth - [Clerk](https://go.clerk.com/ILdYhn7)
-- Error tracking - [<picture><img alt="Sentry" src="public/assets/sentry.svg">
-  </picture>](https://sentry.io/for/nextjs/?utm_source=github&utm_medium=paid-community&utm_campaign=general-fy26q2-nextjs&utm_content=github-banner-project-tryfree)
-- Styling - [Tailwind CSS v4](https://tailwindcss.com)
-- Components - [Shadcn-ui](https://ui.shadcn.com)
-- Schema Validations - [Zod](https://zod.dev)
-- State Management - [Zustand](https://zustand-demo.pmnd.rs)
-- Search params state manager - [Nuqs](https://nuqs.47ng.com/)
-- Tables - [Tanstack Data Tables](https://ui.shadcn.com/docs/components/data-table) • [Dice table](https://www.diceui.com/docs/components/data-table)
-- Forms - [React Hook Form](https://ui.shadcn.com/docs/components/form)
-- Command+k interface - [kbar](https://kbar.vercel.app/)
-- Linting - [ESLint](https://eslint.org)
-- Pre-commit Hooks - [Husky](https://typicode.github.io/husky/)
-- Formatting - [Prettier](https://prettier.io)
+- **Monitor** real-time mempool transactions
+- **Select** transactions manually or with smart criteria
+- **Submit** custom job declarations to their mining pool
+- **Optimize** profitability by choosing high-fee transactions
 
-_If you are looking for a React admin dashboard starter, here is the [repo](https://github.com/Kiranism/react-shadcn-dashboard-starter)._
+By shifting transaction control from the pool to individual miners, this dashboard promotes decentralization and maximizes miner rewards.
 
-## Pages
+---
 
-| Pages                                                                                                                                                                  | Specifications                                                                                                                                                                                                                                                          |
-| :--------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Signup / Signin](https://go.clerk.com/ILdYhn7)                                                                                                                        | Authentication with **Clerk** provides secure authentication and user management with multiple sign-in options including passwordless authentication, social logins, and enterprise SSO - all designed to enhance security while delivering a seamless user experience. |
-| [Dashboard (Overview)](https://shadcn-dashboard.kiranism.dev/dashboard)                                                                                                | Cards with Recharts graphs for analytics. Parallel routes in the overview sections feature independent loading, error handling, and isolated component rendering.                                                                                                       |
-| [Product](https://shadcn-dashboard.kiranism.dev/dashboard/product)                                                                                                     | Tanstack tables with server side searching, filter, pagination by Nuqs which is a Type-safe search params state manager in nextjs                                                                                                                                       |
-| [Product/new](https://shadcn-dashboard.kiranism.dev/dashboard/product/new)                                                                                             | A Product Form with shadcn form (react-hook-form + zod).                                                                                                                                                                                                                |
-| [Profile](https://shadcn-dashboard.kiranism.dev/dashboard/profile)                                                                                                     | Clerk's full-featured account management UI that allows users to manage their profile and security settings                                                                                                                                                             |
-| [Kanban Board](https://shadcn-dashboard.kiranism.dev/dashboard/kanban)                                                                                                 | A Drag n Drop task management board with dnd-kit and zustand to persist state locally.                                                                                                                                                                                  |
-| [Not Found](https://shadcn-dashboard.kiranism.dev/dashboard/notfound)                                                                                                  | Not Found Page Added in the root level                                                                                                                                                                                                                                  |
-| [Global Error](https://sentry.io/for/nextjs/?utm_source=github&utm_medium=paid-community&utm_campaign=general-fy26q2-nextjs&utm_content=github-banner-project-tryfree) | A centralized error page that captures and displays errors across the application. Integrated with **Sentry** to log errors, provide detailed reports, and enable replay functionality for better debugging.                                                            |
+## Features
 
-## Feature based organization
+- **Real-time Mempool Feed**: Live updates via WebSocket for pending transactions
+- **Transaction Selection**: Manual multi-select and automated filters (fee rate, size, profitability)
+- **Job Declaration**: Direct Stratum V2 submission and status tracking
+- **Floating Action Bar**: Contextual bulk actions (submit, copy IDs, export CSV)
+- **Analytics**: Charts and stats for selection efficiency and estimated rewards
+- **Responsive UI**: Desktop and mobile-friendly layout
+- **Dark/Light Themes**: System and manual theme switching
+- **Error Monitoring**: Sentry integration for production diagnostics
 
-```plaintext
-src/
-├── app/ # Next.js App Router directory
-│ ├── (auth)/ # Auth route group
-│ │ ├── (signin)/
-│ ├── (dashboard)/ # Dashboard route group
-│ │ ├── layout.tsx
-│ │ ├── loading.tsx
-│ │ └── page.tsx
-│ └── api/ # API routes
-│
-├── components/ # Shared components
-│ ├── ui/ # UI components (buttons, inputs, etc.)
-│ └── layout/ # Layout components (header, sidebar, etc.)
-│
-├── features/ # Feature-based modules
-│ ├── feature/
-│ │ ├── components/ # Feature-specific components
-│ │ ├── actions/ # Server actions
-│ │ ├── schemas/ # Form validation schemas
-│ │ └── utils/ # Feature-specific utilities
-│ │
-├── lib/ # Core utilities and configurations
-│ ├── auth/ # Auth configuration
-│ ├── db/ # Database utilities
-│ └── utils/ # Shared utilities
-│
-├── hooks/ # Custom hooks
-│ └── use-debounce.ts
-│
-├── stores/ # Zustand stores
-│ └── dashboard-store.ts
-│
-└── types/ # TypeScript types
-└── index.ts
-```
+---
+
+## Tech Stack
+
+| Category           | Technology                           |
+| ------------------ | ------------------------------------ |
+| Framework          | Next.js 15 (App Router)              |
+| Language           | TypeScript                           |
+| Styling            | Tailwind CSS v4                      |
+| Components         | Shadcn UI                            |
+| Table Library      | TanStack Table                       |
+| State Management   | Zustand                              |
+| WebSocket Client   | Reconnecting WebSocket               |
+| URL State Routing  | Nuqs                                 |
+| Animations         | Motion                               |
+| Forms & Validation | Zod                                  |
+| Icons              | Lucide React, Tabler Icons           |
+| Monitoring         | Sentry (Next.js SDK)                 |
+| Lint & Format      | ESLint, Prettier, Husky, lint-staged |
+
+---
 
 ## Getting Started
 
-> [!NOTE]  
-> We are using **Next 15** with **React 19**, follow these steps:
+### Prerequisites
 
-Clone the repo:
+- Node.js ≥18
+- pnpm or npm
 
+### Installation
+
+```bash
+# Clone the repo
+git clone https://github.com/your-username/dmnd-transaction-dashboard.git
+cd dmnd-transaction-dashboard/dashboard
+
+# Install dependencies
+pnpm install
 ```
-git clone https://github.com/Kiranism/next-shadcn-dashboard-starter.git
+
+### Environment Variables
+
+Copy and edit the example file:
+
+```bash
+cp env.example.txt .env.local
 ```
 
-- `pnpm install` ( we have legacy-peer-deps=true added in the .npmrc)
-- Create a `.env.local` file by copying the example environment file:
-  `cp env.example.txt .env.local`
-- Add the required environment variables to the `.env.local` file.
-- `pnpm run dev`
+```env
+# DMND Proxy
+NEXT_PUBLIC_DMND_PROXY_URL=ws://localhost:8080
+NEXT_PUBLIC_MEMPOOL_API_URL=https://mempool.space/api
 
-##### Environment Configuration Setup
+# Mining Defaults
+NEXT_PUBLIC_DEFAULT_FEE_RATE=10
+NEXT_PUBLIC_MAX_BLOCK_SIZE=4000000
 
-To configure the environment for this project, refer to the `env.example.txt` file. This file contains the necessary environment variables required for authentication and error tracking.
+# Sentry (optional)
+NEXT_PUBLIC_SENTRY_DSN=<your_dsn>
+NEXT_PUBLIC_SENTRY_DISABLED=true
+```
 
-You should now be able to access the application at http://localhost:3000.
+### Development
 
-> [!WARNING]
-> After cloning or forking the repository, be cautious when pulling or syncing with the latest changes, as this may result in breaking conflicts.
+```bash
+# Start dev server with Turbopack
+pnpm dev
+```
 
-Cheers! 🥂
+Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+---
+
+## Usage
+
+1. **Monitor** the live mempool feed
+2. **Select** transactions manually or via filter criteria
+3. **Review** selected transaction details in the floating action bar
+4. **Submit** your custom job declaration to the pool
+5. **Track** job status and analytics in the dashboard
+
+---
+
+## Architecture
+
+```plaintext
+src/
+├── api/                      # API routes & proxy endpoints
+├── app/
+│   ├── dashboard/
+│   │   └── overview/         # Transaction monitoring & mempool data
+├── components/
+│   ├── ui/                   # Shadcn UI components (tables, buttons, etc.)
+│   ├── layout/               # Layout components (sidebar, header)
+│   └── modal/                # Modal components
+├── features/
+│   ├── overview/             # Transaction tables & mempool monitoring
+│   ├── kanban/               # Kanban board components
+│   ├── products/             # Product management features
+│   └── profile/              # Profile management
+├── hooks/
+│   ├── use-mempool-transactions.ts  # Real-time mempool WebSocket
+│   ├── use-data-table.ts            # Table state management
+│   └── use-proxy-state.ts           # Proxy connection state
+├── lib/
+│   ├── utils.ts              # General utilities
+│   ├── format.ts             # Data formatting helpers
+│   └── composition.ts        # Component composition utilities
+├── types/
+│   ├── mempool-transaction.ts # Bitcoin transaction types
+│   ├── proxy-stats.ts        # Mining statistics types
+│   └── data-table.ts         # Table configuration types
+└── constants/
+    └── data.ts               # Static data & configurations
+```

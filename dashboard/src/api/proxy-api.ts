@@ -6,7 +6,7 @@ import type {
   AggregateStats,
   SystemStats
 } from '../types/proxy-stats';
-import { formatBytes } from '@/lib/utils';
+import { formatBytes } from '@/lib/format';
 
 export interface ApiResponse<T> {
   success: boolean;
