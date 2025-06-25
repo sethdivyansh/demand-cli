@@ -19,18 +19,9 @@ import {
   usePoolInfo,
   useSystemStats
 } from '@/hooks/use-proxy-state';
-import {
-  IconCpu,
-  IconDeviceDesktop,
-  IconNetwork,
-  IconChartBar,
-  IconActivity,
-  IconClock,
-  IconTrendingUp,
-  IconTrendingDown
-} from '@tabler/icons-react';
 import { Progress } from '../ui/progress';
 import { formatDateTime, formatHashrate } from '@/lib/format';
+import { Icons } from '../icons';
 
 interface StatsModalProps {
   isOpen: boolean;
@@ -69,7 +60,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                 <Card>
                   <CardHeader className='flex flex-row items-center space-y-0 pb-2'>
                     <CardTitle className='flex items-center gap-2 text-sm font-medium'>
-                      <IconActivity className='h-4 w-4' />
+                      <Icons.activity className='h-4 w-4' />
                       Health Status
                     </CardTitle>
                   </CardHeader>
@@ -103,7 +94,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                 <Card>
                   <CardHeader>
                     <CardTitle className='flex items-center gap-2'>
-                      <IconChartBar className='h-4 w-4' />
+                      <Icons.chartBar className='h-4 w-4' />
                       Aggregate Statistics
                     </CardTitle>
                   </CardHeader>
@@ -178,7 +169,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                     <Card key={id}>
                       <CardHeader className='pb-3'>
                         <CardTitle className='flex items-center gap-2 text-base'>
-                          <IconDeviceDesktop className='h-4 w-4' />
+                          <Icons.desktop className='h-4 w-4' />
                           {miner.device_name}
                         </CardTitle>
                         <CardDescription>Miner ID: {id}</CardDescription>
@@ -203,13 +194,13 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                         <Separator />
                         <div className='flex justify-between'>
                           <div className='flex items-center gap-2'>
-                            <IconTrendingUp className='h-4 w-4 text-green-600' />
+                            <Icons.trendingUp className='h-4 w-4 text-green-600' />
                             <span className='text-sm'>
                               Accepted: {miner.accepted_shares}
                             </span>
                           </div>
                           <div className='flex items-center gap-2'>
-                            <IconTrendingDown className='h-4 w-4 text-red-600' />
+                            <Icons.trendingDown className='h-4 w-4 text-red-600' />
                             <span className='text-sm'>
                               Rejected: {miner.rejected_shares}
                             </span>
@@ -233,7 +224,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                 <Card>
                   <CardHeader>
                     <CardTitle className='flex items-center gap-2'>
-                      <IconCpu className='h-4 w-4' />
+                      <Icons.cpu className='h-4 w-4' />
                       System Performance
                     </CardTitle>
                   </CardHeader>
@@ -295,7 +286,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                 <Card>
                   <CardHeader>
                     <CardTitle className='flex items-center gap-2'>
-                      <IconNetwork className='h-4 w-4' />
+                      <Icons.network className='h-4 w-4' />
                       Pool Information
                     </CardTitle>
                   </CardHeader>
@@ -317,7 +308,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ isOpen, onClose }) => {
                         <Separator />
                         <div className='flex items-center justify-between'>
                           <div className='flex items-center gap-2'>
-                            <IconClock className='h-4 w-4' />
+                            <Icons.clock className='h-4 w-4' />
                             <div className='flex flex-row gap-2'>
                               <div className='text-md font-medium'>Latency</div>
                               <div className='text-md font-semibold'>

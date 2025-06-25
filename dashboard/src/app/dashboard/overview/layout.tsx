@@ -18,15 +18,6 @@ import {
   usePoolInfo,
   useSystemStats
 } from '@/hooks/use-proxy-state';
-import {
-  IconTrendingUp,
-  IconChartBar,
-  IconActivity,
-  IconServer,
-  IconCpu,
-  IconNetwork,
-  IconDeviceDesktop
-} from '@tabler/icons-react';
 import React from 'react';
 import {
   Tooltip,
@@ -35,6 +26,7 @@ import {
 } from '@/components/ui/tooltip';
 import { Skeleton } from '@/components/ui/skeleton';
 import { formatDateTime, formatHashrate } from '@/lib/format';
+import { Icons } from '@/components/icons';
 
 export default function OverViewLayout({
   mempool_transactions
@@ -82,7 +74,7 @@ export default function OverViewLayout({
               variant='outline'
               className='hover:bg-primary/5 flex items-center gap-2 transition-colors'
             >
-              <IconChartBar className='h-4 w-4' />
+              <Icons.chartBar className='h-4 w-4' />
               Detailed Stats
             </Button>
             <Tooltip>
@@ -127,7 +119,7 @@ export default function OverViewLayout({
           <Card className='@container/card'>
             <CardHeader>
               <CardDescription className='flex items-center gap-2'>
-                <IconNetwork className='h-4 w-4' />
+                <Icons.network className='h-4 w-4' />
                 Pool Address
               </CardDescription>
               <CardTitle className='text-xl font-semibold tabular-nums @[250px]/card:text-2xl'>
@@ -158,7 +150,7 @@ export default function OverViewLayout({
           <Card className='@container/card'>
             <CardHeader>
               <CardDescription className='flex items-center gap-2'>
-                <IconDeviceDesktop className='h-4 w-4' />
+                <Icons.desktop className='h-4 w-4' />
                 Connected Devices
               </CardDescription>
               <CardTitle className='text-2xl font-semibold tabular-nums @[250px]/card:text-3xl'>
@@ -172,14 +164,14 @@ export default function OverViewLayout({
               </CardTitle>
               <CardAction>
                 <Badge variant='outline'>
-                  <IconActivity className='mr-1 h-3 w-3' />
+                  <Icons.activity className='mr-1 h-3 w-3' />
                   Active
                 </Badge>
               </CardAction>
             </CardHeader>
             <CardFooter className='flex-col items-start gap-1.5 text-sm'>
               <div className='flex items-center gap-2 font-medium'>
-                Mining devices online <IconTrendingUp className='size-4' />
+                Mining devices online <Icons.trendingUp className='size-4' />
               </div>
               <div className='text-muted-foreground'>Total active miners</div>
             </CardFooter>
@@ -188,7 +180,7 @@ export default function OverViewLayout({
           <Card className='@container/card'>
             <CardHeader>
               <CardDescription className='flex items-center gap-2'>
-                <IconServer className='h-4 w-4' />
+                <Icons.server className='h-4 w-4' />
                 Total Hashrate
               </CardDescription>
               <CardTitle className='text-2xl font-semibold tabular-nums @[250px]/card:text-3xl'>
@@ -204,14 +196,14 @@ export default function OverViewLayout({
               </CardTitle>
               <CardAction>
                 <Badge variant='outline'>
-                  <IconTrendingUp className='mr-1 h-3 w-3' />
+                  <Icons.trendingUp className='mr-1 h-3 w-3' />
                   Mining
                 </Badge>
               </CardAction>
             </CardHeader>
             <CardFooter className='relative flex-col items-start gap-1.5 text-sm'>
               <div className='flex items-center gap-2 font-medium'>
-                Combined mining power <IconTrendingUp className='size-4' />
+                Combined mining power <Icons.trendingUp className='size-4' />
               </div>
               <div className='text-muted-foreground'>
                 Aggregate hash performance
@@ -222,7 +214,7 @@ export default function OverViewLayout({
           <Card className='@container/card'>
             <CardHeader>
               <CardDescription className='flex items-center gap-2'>
-                <IconCpu className='h-4 w-4' />
+                <Icons.cpu className='h-4 w-4' />
                 CPU Usage
               </CardDescription>
               <CardTitle className='text-2xl font-semibold tabular-nums @[250px]/card:text-3xl'>
@@ -238,7 +230,7 @@ export default function OverViewLayout({
               </CardTitle>
               <CardAction>
                 <Badge variant='outline'>
-                  <IconActivity className='mr-1 h-3 w-3' />
+                  <Icons.activity className='mr-1 h-3 w-3' />
                   {systemStats?.cpu_usage && systemStats.cpu_usage > 80
                     ? 'High'
                     : systemStats?.cpu_usage && systemStats.cpu_usage > 60
@@ -249,7 +241,7 @@ export default function OverViewLayout({
             </CardHeader>
             <CardFooter className='relative flex-col items-start gap-1.5 text-sm'>
               <div className='flex items-center gap-2 font-medium'>
-                System performance <IconTrendingUp className='size-4' />
+                System performance <Icons.trendingUp className='size-4' />
               </div>
               <div className='text-muted-foreground'>
                 Memory:{' '}
