@@ -45,6 +45,8 @@ struct Args {
     monitor: bool,
     #[clap(long, short = 'u')]
     auto_update: bool,
+    #[clap(long = "custom-job-timeout")]
+    custom_job_timeout: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,6 +66,7 @@ struct ConfigFile {
     api_server_port: Option<String>,
     monitor: Option<bool>,
     auto_update: Option<bool>,
+    custom_job_timeout: Option<u64>,
 }
 
 pub struct Configuration {
@@ -82,6 +85,7 @@ pub struct Configuration {
     api_server_port: String,
     monitor: bool,
     auto_update: bool,
+    custom_job_timeout: u64,
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -161,6 +165,10 @@ impl Configuration {
         CONFIG.auto_update
     }
 
+    pub fn custom_job_timeout() -> u64 {
+        CONFIG.custom_job_timeout
+    }
+
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
@@ -184,6 +192,7 @@ impl Configuration {
                 api_server_port: None,
                 monitor: None,
                 auto_update: None,
+                custom_job_timeout: None,
             });
 
         let token = args
@@ -325,6 +334,16 @@ impl Configuration {
             || config.auto_update.unwrap_or(true)
             || std::env::var("AUTO_UPDATE").is_ok();
 
+        let custom_job_timeout = args
+            .custom_job_timeout
+            .or(config.custom_job_timeout)
+            .or_else(|| {
+                std::env::var("CUSTOM_JOB_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(30);
+
         Configuration {
             token,
             tp_address,
@@ -341,6 +360,7 @@ impl Configuration {
             api_server_port,
             monitor,
             auto_update,
+            custom_job_timeout,
         }
     }
 }
