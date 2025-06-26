@@ -82,22 +82,23 @@ impl Router {
         info!("Selecting best Pool for connection");
         if self.pool_addresses.is_empty() {
             error!("No pool addresses provided");
+            self.latency_tx.send_replace(None);
             return None;
         }
-        if self.pool_addresses.len() == 1 {
+        let (pool, latency) = if self.pool_addresses.len() == 1 {
+            let pool = self.pool_addresses[0];
             info!(
                 "Only one pool address available, using: {:?}",
                 self.pool_addresses[0]
             );
-            return Some(self.pool_addresses[0]);
-        }
-        if let Some((pool, latency)) = self.select_pool().await {
-            info!("Latency for Pool {:?} is {:?}", pool, latency);
-            self.latency_tx.send_replace(Some(latency)); // update latency
-            Some(pool)
+            let latency = self.get_latency(pool).await.ok()?;
+            (pool, latency)
         } else {
-            None
-        }
+            self.select_pool().await?
+        };
+        info!("Latency for Pool {:?} is {:?}", pool, latency);
+        self.latency_tx.send_replace(Some(latency));
+        Some(pool)
     }
 
     /// Select the best pool for monitoring
