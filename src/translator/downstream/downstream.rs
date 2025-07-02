@@ -28,14 +28,18 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 
-use std::{collections::{hash_map::Entry, HashMap, VecDeque}, net::IpAddr, sync::Arc};
+use rand::Rng;
+use std::{
+    collections::{hash_map::Entry, HashMap, VecDeque},
+    net::IpAddr,
+    sync::Arc,
+};
 use sv1_api::{
     client_to_server, json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be},
     IsServer,
 };
 use tracing::{error, info, warn};
-use rand::Rng;
 
 #[derive(Debug, Clone)]
 pub struct DownstreamDifficultyConfig {
@@ -449,13 +453,19 @@ impl IsServer<'static> for Downstream {
         let mut request = request.clone();
         let job_id_as_number = request.job_id.parse::<u32>();
         if job_id_as_number.is_err() {
-            error!("Share rejected: can not convert v1 job id to number. v1 id: {}", request.job_id);
+            error!(
+                "Share rejected: can not convert v1 job id to number. v1 id: {}",
+                request.job_id
+            );
             self.stats_sender.update_rejected_shares(self.connection_id);
             return false;
         }
         let v2_id = self.job_ids.get_v2(job_id_as_number.unwrap());
         if v2_id.is_none() {
-            error!("Share rejected: can not convert from v1 to v2 job id. v1 id: {}", request.job_id);
+            error!(
+                "Share rejected: can not convert from v1 to v2 job id. v1 id: {}",
+                request.job_id
+            );
             self.stats_sender.update_rejected_shares(self.connection_id);
             return false;
         }
@@ -583,6 +593,10 @@ impl IsServer<'static> for Downstream {
     fn notify(&mut self) -> Result<json_rpc::Message, sv1_api::error::Error> {
         unreachable!()
     }
+
+    fn handle_suggest_difficulty(&self, _: &sv1_api::client_to_server::SuggestDifficulty) {
+        todo!()
+    }
 }
 
 impl IsMiningDownstream for Downstream {}
@@ -597,9 +611,9 @@ impl IsDownstream for Downstream {
 
 #[derive(Debug)]
 pub struct JobIds {
-    v1_to_v2: HashMap<u32,u32>,
-    v2_to_v1: HashMap<u32,Vec<u32>>,
-    last_v2s: CircularBuffer<u32,3>,
+    v1_to_v2: HashMap<u32, u32>,
+    v2_to_v1: HashMap<u32, Vec<u32>>,
+    last_v2s: CircularBuffer<u32, 3>,
 }
 
 impl JobIds {
@@ -647,7 +661,6 @@ impl Default for JobIds {
     }
 }
 
-
 #[derive(Debug)]
 struct CircularBuffer<T, const N: usize> {
     buffer: [Option<T>; N],
@@ -679,7 +692,6 @@ impl<T, const N: usize> CircularBuffer<T, N> {
         }
     }
 }
-
 
 //#[cfg(test)]
 //mod tests {
